@@ -897,7 +897,10 @@ public class PortalRenderer {
 
         // Four-corner ray occlusion only for the outermost portal pass (recursion 1 after increment).
         // Nested renderLevel uses PortalCamera; established discard/stencil/nesting handles those.
-        boolean openingOccluded = recursion == 1 && portalOpeningFullyOccluded(portal, camera);
+        float[] portalRect = computePortalNdcRect(portal, camera, projectionMatrix);
+        float portalCoverage = portalCoverageFromRect(portalRect);
+
+        boolean openingOccluded = recursion == 1 && portalOpeningFullyOccludedCached(portal, camera);
         if(openingOccluded) {
             portalsStencilSkippedOccludedRays++;
             finishPortalEntity(portal, camera, partialTicks, fabulousGraphics);
@@ -958,7 +961,6 @@ public class PortalRenderer {
                         currentParentNdcRect[0], currentParentNdcRect[1],
                         currentParentNdcRect[2], currentParentNdcRect[3]};
                 parentNdcRectStack.push(savedParentNdcRect);
-                float[] portalRect = computePortalNdcRect(portal, camera, projectionMatrix);
                 if(portalRect != null) {
                     float[] narrowed = intersectRect(savedParentNdcRect, portalRect);
                     if(narrowed != null) {
