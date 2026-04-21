@@ -117,9 +117,14 @@ public class PortalRenderer {
     public int portalsStencilSkippedOccludedRays = 0;
 
     private static final double RAY_CORNER_EPSILON = 0.08;
+    private static final long OCCLUSION_CACHE_TICKS = 2L;
+    private static final double OCCLUSION_CACHE_CAMERA_POS_DELTA_SQR = 0.04;
+    private static final float OCCLUSION_CACHE_CAMERA_ROT_DELTA = 1.5F;
+    private static final float NESTED_PORTAL_MIN_COVERAGE = 0.015F;
 
     /** Cached {@code Optional.of(VoxelShapes.empty())} for the portal-sight shape override hot path. */
     private static final Optional<VoxelShape> EMPTY_SHAPE_OVERRIDE = Optional.of(VoxelShapes.empty());
+    private final Map<UUID, PortalOcclusionCacheEntry> portalOcclusionCache = new HashMap<>();
 
     // --- profiler ---
     public static final Profile PROFILE = new Profile();
@@ -212,6 +217,14 @@ public class PortalRenderer {
                         kv.getKey(), fmt(e.totalNs), e.calls, fmt(e.maxNs), pct));
             }
         }
+    }
+
+    private static final class PortalOcclusionCacheEntry {
+        long gameTime;
+        Vector3d cameraPos;
+        float xRot;
+        float yRot;
+        boolean fullyOccluded;
     }
 
     /** {@code -Dportalmod.portalProfiler=true} */
@@ -726,6 +739,46 @@ public class PortalRenderer {
         float yMax = Math.min(a[3], b[3]);
         if(xMin >= xMax || yMin >= yMax) return null;
         return new float[]{xMin, yMin, xMax, yMax};
+    }
+
+    private static float portalCoverageFromRect(@Nullable float[] rect) {
+        if(rect == null)
+            return 1F;
+        float width = Math.max(0F, rect[2] - rect[0]);
+        float height = Math.max(0F, rect[3] - rect[1]);
+        return MathHelper.clamp((width * height) * 0.25F, 0F, 1F);
+    }
+
+    private static boolean cameraChangedTooMuchForOcclusionCache(PortalOcclusionCacheEntry entry, ActiveRenderInfo camera) {
+        Vector3d currentPos = camera.getPosition();
+        if(entry.cameraPos == null || entry.cameraPos.distanceToSqr(currentPos) > OCCLUSION_CACHE_CAMERA_POS_DELTA_SQR)
+            return true;
+        return Math.abs(entry.xRot - camera.getXRot()) > OCCLUSION_CACHE_CAMERA_ROT_DELTA
+                || Math.abs(entry.yRot - camera.getYRot()) > OCCLUSION_CACHE_CAMERA_ROT_DELTA;
+    }
+
+    private boolean portalOpeningFullyOccludedCached(PortalEntity portal, ActiveRenderInfo camera) {
+        ClientWorld world = Minecraft.getInstance().level;
+        if(world == null)
+            return false;
+
+        long gameTime = world.getGameTime();
+        PortalOcclusionCacheEntry cached = portalOcclusionCache.get(portal.getUUID());
+        if(cached != null
+                && gameTime - cached.gameTime <= OCCLUSION_CACHE_TICKS
+                && !cameraChangedTooMuchForOcclusionCache(cached, camera)) {
+            return cached.fullyOccluded;
+        }
+
+        boolean fullyOccluded = portalOpeningFullyOccluded(portal, camera);
+        PortalOcclusionCacheEntry updated = new PortalOcclusionCacheEntry();
+        updated.gameTime = gameTime;
+        updated.cameraPos = camera.getPosition();
+        updated.xRot = camera.getXRot();
+        updated.yRot = camera.getYRot();
+        updated.fullyOccluded = fullyOccluded;
+        portalOcclusionCache.put(portal.getUUID(), updated);
+        return fullyOccluded;
     }
 
     private void finishPortalEntity(PortalEntity portal, ActiveRenderInfo camera, float partialTicks, boolean fabulousGraphics) {
