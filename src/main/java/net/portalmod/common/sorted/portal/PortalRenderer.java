@@ -441,7 +441,6 @@ public class PortalRenderer {
         }
 
         renderedPortals = 0;
-
         for(Entity entity : level.entitiesForRendering()) {
             if(entity instanceof PortalEntity) {
                 PROFILE.push("renderPortal");
