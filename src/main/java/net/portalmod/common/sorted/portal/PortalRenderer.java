@@ -11,8 +11,8 @@ import net.minecraft.client.renderer.culling.ClippingHelper;
 import net.minecraft.client.renderer.tileentity.TileEntityRendererDispatcher;
 import net.minecraft.client.renderer.vertex.DefaultVertexFormats;
 import net.minecraft.client.renderer.vertex.VertexBuffer;
-import net.minecraft.client.settings.GraphicsFanciness;
 import net.minecraft.client.shader.Framebuffer;
+import net.minecraft.client.settings.GraphicsFanciness;
 import net.minecraft.client.world.ClientWorld;
 import net.minecraft.entity.Entity;
 import net.minecraft.particles.RedstoneParticleData;
@@ -117,9 +117,42 @@ public class PortalRenderer {
     public int portalsStencilSkippedOccludedRays = 0;
 
     private static final double RAY_CORNER_EPSILON = 0.08;
-
+    private static final long OCCLUSION_CACHE_TICKS = 2L;
+    private static final long OCCLUSION_CACHE_MAX_TICKS = 6L;
+    private static final double OCCLUSION_CACHE_CAMERA_POS_DELTA_SQR = 0.04;
+    private static final double OCCLUSION_CACHE_CAMERA_POS_DELTA_SQR_MAX = 0.36;
+    private static final float OCCLUSION_CACHE_CAMERA_ROT_DELTA = 1.5F;
+    private static final float OCCLUSION_CACHE_CAMERA_ROT_DELTA_MAX = 8.0F;
+    private static final float NESTED_PORTAL_MIN_COVERAGE = 0.01F;
+    private static final double FAST_CAMERA_POS_DELTA_SQR = 0.04;
+    private static final float FAST_CAMERA_ROT_DELTA = 6.0F;
+    private static final float FAST_CAMERA_HARD_CLAMP_START = 0.55F;
+    private static final int FULL_DETAIL_PORTAL_BUDGET = 2;
+    private static final int MEDIUM_DETAIL_PORTAL_BUDGET = 4;
+    private static final float TEMPORAL_VISIBLE_IMPORTANCE_BONUS = 0.08F;
+    private static final float TEMPORAL_VISIBLE_STREAK_BONUS = 0.02F;
+    private static final float TEMPORAL_CULLED_IMPORTANCE_PENALTY = 0.03F;
     /** Cached {@code Optional.of(VoxelShapes.empty())} for the portal-sight shape override hot path. */
     private static final Optional<VoxelShape> EMPTY_SHAPE_OVERRIDE = Optional.of(VoxelShapes.empty());
+    private final Map<UUID, PortalOcclusionCacheEntry> portalOcclusionCache = new HashMap<>();
+    private final Map<UUID, PortalProjectionCacheEntry> portalProjectionCache = new HashMap<>();
+    private final Map<UUID, PortalFramePlanEntry> portalFramePlan = new HashMap<>();
+    private final Map<UUID, PortalTemporalVisibilityEntry> portalTemporalVisibility = new HashMap<>();
+    private final Map<String, PortalBorderTextureInfo> portalBorderTextureCache = new HashMap<>();
+    private final List<PortalEntity> framePortalEntities = new ArrayList<>();
+    private final List<PortalEntity> topLevelPortalCandidates = new ArrayList<>();
+    private final Deque<ObjectList<WorldRenderer.LocalRenderInformationContainer>> renderChunkSnapshotPool = new ArrayDeque<>();
+    private final Deque<NestedRenderSettings> nestedRenderSettingsStack = new ArrayDeque<>();
+    private ClientWorld framePortalLevel;
+    private ClientWorld occlusionCacheLevel;
+    private long portalProjectionFrameId;
+    private Vector3d lastOuterCameraPos;
+    private float lastOuterCameraXRot;
+    private float lastOuterCameraYRot;
+    private float fastCameraMotionFactor;
+    private boolean performanceOptimizationsEnabled = true;
+    private boolean mainFramebufferStencilFailed;
+    private boolean tempFramebufferStencilFailed;
 
     // --- profiler ---
     public static final Profile PROFILE = new Profile();
@@ -214,9 +247,396 @@ public class PortalRenderer {
         }
     }
 
+    private static final class PortalOcclusionCacheEntry {
+        long gameTime;
+        Vector3d cameraPos;
+        float xRot;
+        float yRot;
+        boolean fullyOccluded;
+    }
+
+    private static final class PortalProjectionCacheEntry {
+        long frameId;
+        Vector3d cameraPos;
+        float xRot;
+        float yRot;
+        @Nullable
+        float[] rect;
+    }
+
+    private static final class PortalBorderTextureInfo {
+        final ResourceLocation location;
+        final int frameCount;
+
+        private PortalBorderTextureInfo(ResourceLocation location, int frameCount) {
+            this.location = location;
+            this.frameCount = frameCount;
+        }
+    }
+
+    private static final class PortalFramePlanEntry {
+        float coverage;
+        float importance;
+        int rank;
+        boolean topLevelCandidate;
+    }
+
+    private static final class PortalTemporalVisibilityEntry {
+        boolean visibleLastFrame;
+        int visibleStreak;
+        int culledStreak;
+    }
+
+    public static final class NestedRenderSettings {
+        final boolean renderEntities;
+        final boolean renderBlockEntities;
+        final boolean renderTranslucent;
+        final boolean renderParticles;
+        final boolean renderSky;
+        final boolean renderClouds;
+        final boolean renderWeather;
+        final boolean renderWorldBounds;
+        final boolean compileChunks;
+
+        private NestedRenderSettings(boolean renderEntities, boolean renderBlockEntities,
+                                     boolean renderTranslucent, boolean renderParticles,
+                                     boolean renderSky, boolean renderClouds, boolean renderWeather,
+                                     boolean renderWorldBounds,
+                                     boolean compileChunks) {
+            this.renderEntities = renderEntities;
+            this.renderBlockEntities = renderBlockEntities;
+            this.renderTranslucent = renderTranslucent;
+            this.renderParticles = renderParticles;
+            this.renderSky = renderSky;
+            this.renderClouds = renderClouds;
+            this.renderWeather = renderWeather;
+            this.renderWorldBounds = renderWorldBounds;
+            this.compileChunks = compileChunks;
+        }
+
+        private static NestedRenderSettings full() {
+            return new NestedRenderSettings(true, true, true, true, true, true, true, true, true);
+        }
+
+        private NestedRenderSettings mergeWithParent(@Nullable NestedRenderSettings parent) {
+            if(parent == null)
+                return this;
+            return new NestedRenderSettings(
+                    parent.renderEntities && this.renderEntities,
+                    parent.renderBlockEntities && this.renderBlockEntities,
+                    parent.renderTranslucent && this.renderTranslucent,
+                    parent.renderParticles && this.renderParticles,
+                    parent.renderSky && this.renderSky,
+                    parent.renderClouds && this.renderClouds,
+                    parent.renderWeather && this.renderWeather,
+                    parent.renderWorldBounds && this.renderWorldBounds,
+                    parent.compileChunks && this.compileChunks
+            );
+        }
+    }
+
     /** {@code -Dportalmod.portalProfiler=true} */
     public static boolean portalProfilerEnabled() {
         return Boolean.getBoolean("portalmod.portalProfiler");
+    }
+
+    public List<PortalEntity> getFramePortalEntities(ClientWorld level) {
+        if(framePortalLevel != level || framePortalEntities.isEmpty())
+            refreshFramePortalEntities(level);
+        return framePortalEntities;
+    }
+
+    private boolean shouldUsePortalPerformanceOptimizations() {
+        return performanceOptimizationsEnabled;
+    }
+
+    @Nullable
+    public NestedRenderSettings getCurrentNestedRenderSettings() {
+        return nestedRenderSettingsStack.peekLast();
+    }
+
+    public boolean shouldRenderNestedEntities() {
+        NestedRenderSettings settings = getCurrentNestedRenderSettings();
+        return settings == null || settings.renderEntities;
+    }
+
+    public boolean shouldRenderNestedBlockEntities() {
+        NestedRenderSettings settings = getCurrentNestedRenderSettings();
+        return settings == null || settings.renderBlockEntities;
+    }
+
+    public boolean shouldRenderNestedTranslucent() {
+        NestedRenderSettings settings = getCurrentNestedRenderSettings();
+        return settings == null || settings.renderTranslucent;
+    }
+
+    public boolean shouldRenderNestedParticles() {
+        NestedRenderSettings settings = getCurrentNestedRenderSettings();
+        return settings == null || settings.renderParticles;
+    }
+
+    public boolean shouldRenderNestedSky() {
+        NestedRenderSettings settings = getCurrentNestedRenderSettings();
+        return settings == null || settings.renderSky;
+    }
+
+    public boolean shouldRenderNestedClouds() {
+        NestedRenderSettings settings = getCurrentNestedRenderSettings();
+        return settings == null || settings.renderClouds;
+    }
+
+    public boolean shouldRenderNestedWeather() {
+        NestedRenderSettings settings = getCurrentNestedRenderSettings();
+        return settings == null || settings.renderWeather;
+    }
+
+    public boolean shouldRenderNestedWorldBounds() {
+        NestedRenderSettings settings = getCurrentNestedRenderSettings();
+        return settings == null || settings.renderWorldBounds;
+    }
+
+    public boolean shouldCompileNestedChunks() {
+        NestedRenderSettings settings = getCurrentNestedRenderSettings();
+        return settings == null || settings.compileChunks;
+    }
+
+    private void refreshFramePortalEntities(ClientWorld level) {
+        framePortalLevel = level;
+        framePortalEntities.clear();
+        for(Entity entity : level.entitiesForRendering()) {
+            if(entity instanceof PortalEntity)
+                framePortalEntities.add((PortalEntity)entity);
+        }
+    }
+
+    private static double distanceToCameraSqr(PortalEntity portal, Vec3 cameraPos) {
+        Vector3d portalPos = portal.position();
+        double dx = cameraPos.x - portalPos.x;
+        double dy = cameraPos.y - portalPos.y;
+        double dz = cameraPos.z - portalPos.z;
+        return dx * dx + dy * dy + dz * dz;
+    }
+
+    private static boolean isPortalFacingAwayFromCamera(PortalEntity portal, Vec3 cameraPos) {
+        if(portal.getDirection().getAxis().isVertical())
+            return false;
+
+        Vector3d portalPos = portal.position();
+        double dx = cameraPos.x - portalPos.x;
+        double dy = cameraPos.y - portalPos.y;
+        double dz = cameraPos.z - portalPos.z;
+        double distanceSqr = dx * dx + dy * dy + dz * dz;
+        if(distanceSqr <= 1.0D)
+            return false;
+
+        Vector3d portalNormal = Vector3d.atLowerCornerOf(portal.getDirection().getNormal());
+        double invDistance = 1.0D / Math.sqrt(distanceSqr);
+        return (dx * invDistance) * portalNormal.x + (dy * invDistance) * portalNormal.y + (dz * invDistance) * portalNormal.z < 0.0D;
+    }
+
+    private boolean passesCheapPortalViewTests(PortalEntity portal, Vec3 cameraPos, ClippingHelper clippingHelper) {
+        if(!shouldUsePortalPerformanceOptimizations())
+            return true;
+
+        double distanceSqr = distanceToCameraSqr(portal, cameraPos);
+        if(isPortalFacingAwayFromCamera(portal, cameraPos))
+            return false;
+        return distanceSqr <= 1.0D || clippingHelper.isVisible(portal.getBoundingBox());
+    }
+
+    private void buildPortalFramePlan(ActiveRenderInfo camera, ClippingHelper clippingHelper, Matrix4f projectionMatrix) {
+        portalFramePlan.clear();
+        topLevelPortalCandidates.clear();
+        Vec3 cameraPos = new Vec3(camera.getPosition());
+        for(PortalEntity portal : framePortalEntities) {
+            boolean passesCheapTests = passesCheapPortalViewTests(portal, cameraPos, clippingHelper);
+            float[] rect = null;
+            float coverage = 0.0F;
+            float centerBias = 0.0F;
+            if(passesCheapTests) {
+                rect = getPortalNdcRectCached(portal, camera, projectionMatrix);
+                coverage = portalCoverageFromRect(rect);
+                if(rect != null) {
+                    float cx = (rect[0] + rect[2]) * 0.5F;
+                    float cy = (rect[1] + rect[3]) * 0.5F;
+                    float centerDistance = MathHelper.clamp((float)Math.sqrt(cx * cx + cy * cy), 0.0F, 1.5F);
+                    centerBias = 1.0F - MathHelper.clamp(centerDistance / 1.5F, 0.0F, 1.0F);
+                }
+            }
+
+            PortalFramePlanEntry entry = new PortalFramePlanEntry();
+            entry.coverage = coverage;
+            entry.importance = coverage * 0.85F + centerBias * 0.15F;
+            PortalTemporalVisibilityEntry temporal = portalTemporalVisibility.get(portal.getUUID());
+            if(temporal != null) {
+                if(rect != null && temporal.visibleLastFrame) {
+                    entry.importance += TEMPORAL_VISIBLE_IMPORTANCE_BONUS;
+                    entry.importance += Math.min(temporal.visibleStreak, 3) * TEMPORAL_VISIBLE_STREAK_BONUS;
+                }
+                if(!temporal.visibleLastFrame && temporal.culledStreak > 0)
+                    entry.importance -= Math.min(temporal.culledStreak, 3) * TEMPORAL_CULLED_IMPORTANCE_PENALTY;
+            }
+            entry.importance = MathHelper.clamp(entry.importance, 0.0F, 1.5F);
+            entry.topLevelCandidate = !shouldUsePortalPerformanceOptimizations()
+                    || (passesCheapTests && isTopLevelPortalCandidate(portal, cameraPos, clippingHelper, rect));
+            portalFramePlan.put(portal.getUUID(), entry);
+        }
+
+        framePortalEntities.sort((a, b) -> {
+            PortalFramePlanEntry planA = portalFramePlan.get(a.getUUID());
+            PortalFramePlanEntry planB = portalFramePlan.get(b.getUUID());
+            return Float.compare(planB == null ? 0.0F : planB.importance, planA == null ? 0.0F : planA.importance);
+        });
+
+        for(int i = 0; i < framePortalEntities.size(); i++) {
+            PortalFramePlanEntry entry = portalFramePlan.get(framePortalEntities.get(i).getUUID());
+            if(entry != null) {
+                entry.rank = i;
+                if(entry.topLevelCandidate)
+                    topLevelPortalCandidates.add(framePortalEntities.get(i));
+            }
+        }
+    }
+
+    private boolean isTopLevelPortalCandidate(PortalEntity portal, Vec3 cameraPos, ClippingHelper clippingHelper, @Nullable float[] rect) {
+        if(!shouldUsePortalPerformanceOptimizations())
+            return true;
+
+        double distanceSqr = distanceToCameraSqr(portal, cameraPos);
+
+        if(distanceSqr > 1.0D && !clippingHelper.isVisible(portal.getBoundingBox()))
+            return false;
+
+        if(distanceSqr > 2.25D && rect != null && !rectsIntersect(rect, currentParentNdcRect))
+            return false;
+
+        return true;
+    }
+
+    private void pruneOcclusionCache(ClientWorld level) {
+        if(occlusionCacheLevel != level) {
+            portalOcclusionCache.clear();
+            occlusionCacheLevel = level;
+        }
+
+        long gameTime = level.getGameTime();
+        portalOcclusionCache.values().removeIf(entry -> gameTime - entry.gameTime > OCCLUSION_CACHE_MAX_TICKS);
+    }
+
+    private void pruneTemporalVisibilityState() {
+        HashSet<UUID> activePortalIds = new HashSet<>();
+        for(PortalEntity portal : framePortalEntities)
+            activePortalIds.add(portal.getUUID());
+        portalTemporalVisibility.entrySet().removeIf(entry -> !activePortalIds.contains(entry.getKey()));
+    }
+
+    private void markPortalRendered(PortalEntity portal) {
+        PortalTemporalVisibilityEntry entry = portalTemporalVisibility.computeIfAbsent(portal.getUUID(), ignored -> new PortalTemporalVisibilityEntry());
+        entry.visibleLastFrame = true;
+        entry.visibleStreak = Math.min(entry.visibleStreak + 1, 8);
+        entry.culledStreak = 0;
+    }
+
+    private void markPortalCulled(PortalEntity portal) {
+        PortalTemporalVisibilityEntry entry = portalTemporalVisibility.computeIfAbsent(portal.getUUID(), ignored -> new PortalTemporalVisibilityEntry());
+        entry.visibleLastFrame = false;
+        entry.visibleStreak = 0;
+        entry.culledStreak = Math.min(entry.culledStreak + 1, 8);
+    }
+
+    private void updateFastCameraMotion(ActiveRenderInfo camera) {
+        Vector3d currentPos = camera.getPosition();
+        if(lastOuterCameraPos == null) {
+            lastOuterCameraPos = currentPos;
+            lastOuterCameraXRot = camera.getXRot();
+            lastOuterCameraYRot = camera.getYRot();
+            fastCameraMotionFactor = 0.0F;
+            return;
+        }
+
+        double posFactor = MathHelper.clamp(
+                lastOuterCameraPos.distanceToSqr(currentPos) / FAST_CAMERA_POS_DELTA_SQR,
+                0.0,
+                1.0);
+        double xRotFactor = MathHelper.clamp(
+                Math.abs(MathHelper.wrapDegrees(lastOuterCameraXRot - camera.getXRot())) / FAST_CAMERA_ROT_DELTA,
+                0.0F,
+                1.0F);
+        double yRotFactor = MathHelper.clamp(
+                Math.abs(MathHelper.wrapDegrees(lastOuterCameraYRot - camera.getYRot())) / FAST_CAMERA_ROT_DELTA,
+                0.0F,
+                1.0F);
+
+        fastCameraMotionFactor = (float)Math.max(posFactor, Math.max(xRotFactor, yRotFactor));
+        lastOuterCameraPos = currentPos;
+        lastOuterCameraXRot = camera.getXRot();
+        lastOuterCameraYRot = camera.getYRot();
+    }
+
+    private NestedRenderSettings buildNestedRenderSettings(PortalEntity portal, float portalCoverage) {
+        if(!shouldUsePortalPerformanceOptimizations())
+            return NestedRenderSettings.full().mergeWithParent(getCurrentNestedRenderSettings());
+
+        PortalFramePlanEntry plan = portalFramePlan.get(portal.getUUID());
+        int rank = plan == null ? Integer.MAX_VALUE : plan.rank;
+        float coverage = plan == null ? portalCoverage : plan.coverage;
+        boolean fastMotion = fastCameraMotionFactor >= FAST_CAMERA_HARD_CLAMP_START;
+        int fullDetailBudget = fastMotion ? 1 : FULL_DETAIL_PORTAL_BUDGET;
+        int mediumDetailBudget = fastMotion ? 2 : MEDIUM_DETAIL_PORTAL_BUDGET;
+        boolean topPortal = rank < fullDetailBudget;
+        boolean mediumPortal = rank < mediumDetailBudget;
+        boolean largePortal = coverage >= 0.18F;
+        boolean mediumCoverage = coverage >= 0.08F;
+        boolean skyCoverage = coverage >= 0.14F;
+
+        boolean renderEntities = (topPortal && !fastMotion) || largePortal;
+        boolean renderBlockEntities = topPortal && largePortal && fastCameraMotionFactor < 0.45F;
+        boolean renderTranslucent = topPortal || (mediumPortal && mediumCoverage && fastCameraMotionFactor < 0.75F);
+        boolean renderParticles = topPortal && coverage >= 0.2F && fastCameraMotionFactor < 0.35F;
+        boolean renderSky = topPortal && skyCoverage && fastCameraMotionFactor < 0.55F;
+        boolean renderClouds = renderSky && coverage >= 0.22F && fastCameraMotionFactor < 0.25F;
+        boolean renderWeather = topPortal && coverage >= 0.22F && fastCameraMotionFactor < 0.35F;
+        boolean renderWorldBounds = topPortal && coverage >= 0.3F && fastCameraMotionFactor < 0.25F;
+        boolean compileChunks = topPortal && coverage >= 0.16F && fastCameraMotionFactor < 0.2F;
+
+        if(recursion >= 2) {
+            renderEntities &= coverage >= 0.12F && fastCameraMotionFactor < 0.7F;
+            renderBlockEntities = false;
+            renderTranslucent &= coverage >= 0.12F;
+            renderParticles = false;
+            renderSky = false;
+            renderClouds = false;
+            renderWeather = false;
+            renderWorldBounds = false;
+            compileChunks = false;
+        }
+
+        return new NestedRenderSettings(
+                renderEntities,
+                renderBlockEntities,
+                renderTranslucent,
+                renderParticles,
+                renderSky,
+                renderClouds,
+                renderWeather,
+                renderWorldBounds,
+                compileChunks
+        ).mergeWithParent(getCurrentNestedRenderSettings());
+    }
+
+    private ObjectList<WorldRenderer.LocalRenderInformationContainer> acquireRenderChunkSnapshot() {
+        ObjectList<WorldRenderer.LocalRenderInformationContainer> snapshot = renderChunkSnapshotPool.pollFirst();
+        if(snapshot == null)
+            snapshot = new ObjectArrayList<>();
+        else
+            snapshot.clear();
+        return snapshot;
+    }
+
+    private void releaseRenderChunkSnapshot(ObjectList<WorldRenderer.LocalRenderInformationContainer> snapshot) {
+        snapshot.clear();
+        if(renderChunkSnapshotPool.size() < 8)
+            renderChunkSnapshotPool.push(snapshot);
     }
 
     static {
@@ -340,14 +760,10 @@ public class PortalRenderer {
                 + portal.getColor()
                 + (spawning ? "_spawning" : "")
                 + ".png";
-        ResourceLocation location = new ResourceLocation(PortalMod.MODID, path);
-
-        Optional<Dimension> optionalTextureSize = PortalAnimatedTextureHelper.getTextureSize(location);
-        if(!optionalTextureSize.isPresent())
+        PortalBorderTextureInfo textureInfo = getPortalBorderTextureInfo(path);
+        if(textureInfo == null)
             return;
-
-        Dimension textureSize = optionalTextureSize.get();
-        int frameCount = (int)textureSize.getHeight() / (2 * (int)textureSize.getWidth());
+        int frameCount = textureInfo.frameCount;
 
         int frameIndex;
         if(spawning) {
@@ -382,9 +798,71 @@ public class PortalRenderer {
         ShaderInit.PORTAL_FRAME.get().unbind();
     }
 
+    @Nullable
+    private PortalBorderTextureInfo getPortalBorderTextureInfo(String path) {
+        PortalBorderTextureInfo cached = portalBorderTextureCache.get(path);
+        if(cached != null)
+            return cached;
+
+        ResourceLocation location = new ResourceLocation(PortalMod.MODID, path);
+        Optional<Dimension> optionalTextureSize = PortalAnimatedTextureHelper.getTextureSize(location);
+        if(!optionalTextureSize.isPresent())
+            return null;
+
+        Dimension textureSize = optionalTextureSize.get();
+        int frameCount = (int)textureSize.getHeight() / (2 * (int)textureSize.getWidth());
+        PortalBorderTextureInfo created = new PortalBorderTextureInfo(location, frameCount);
+        portalBorderTextureCache.put(path, created);
+        return created;
+    }
+
+    private boolean ensureMainFramebufferStencil(Framebuffer mainFBO) {
+        if(mainFramebufferStencilFailed)
+            return false;
+        if(mainFBO.isStencilEnabled())
+            return true;
+
+        try {
+            mainFBO.enableStencil();
+            return mainFBO.isStencilEnabled();
+        } catch(RuntimeException exception) {
+            mainFramebufferStencilFailed = true;
+            PortalMod.LOGGER.error("Failed to enable stencil on the main framebuffer. Disabling portal rendering for this session.", exception);
+            return false;
+        }
+    }
+
+    private boolean ensureTempFramebufferStencil() {
+        if(tempFramebufferStencilFailed)
+            return false;
+        if(tempFBO.isStencilEnabled())
+            return true;
+
+        try {
+            tempFBO.enableStencil();
+            return tempFBO.isStencilEnabled();
+        } catch(RuntimeException exception) {
+            tempFramebufferStencilFailed = true;
+            PortalMod.LOGGER.error("Failed to enable stencil on the portal temp framebuffer. Falling back to non-fabulous portal rendering.", exception);
+            return false;
+        }
+    }
+
+    private boolean shouldUseShaderTransparency(Minecraft mc) {
+        return false;
+    }
+
+    public boolean prepareMainFramebufferForPortalRendering(@Nullable ClientWorld level) {
+        if(level == null || mainFramebufferStencilFailed)
+            return !mainFramebufferStencilFailed;
+        if(PortalEntity.getCachedOpenPortals(level).isEmpty())
+            return true;
+        return ensureMainFramebufferStencil(Minecraft.getInstance().getMainRenderTarget());
+    }
     public void renderPortals(ClientWorld level, ActiveRenderInfo camera, ClippingHelper clippingHelper, Matrix4f projectionMatrix, float partialTicks) {
         Minecraft mc = Minecraft.getInstance();
         Framebuffer mainFBO = mc.getMainRenderTarget();
+        performanceOptimizationsEnabled = mc.options.graphicsMode != GraphicsFanciness.FABULOUS;
 
         boolean isOuter = recursion == 0;
         if(isOuter) {
@@ -396,46 +874,65 @@ public class PortalRenderer {
             portalsCulledByNdcRect = 0;
             portalsStencilSkippedOccludedRays = 0;
             parentNdcRectStack.clear();
+            nestedRenderSettingsStack.clear();
             currentParentNdcRect[0] = -1f;
             currentParentNdcRect[1] = -1f;
             currentParentNdcRect[2] =  1f;
             currentParentNdcRect[3] =  1f;
+            portalProjectionFrameId++;
+            portalProjectionCache.clear();
+            refreshFramePortalEntities(level);
+            pruneOcclusionCache(level);
+            pruneTemporalVisibilityState();
+            updateFastCameraMotion(camera);
+            buildPortalFramePlan(camera, clippingHelper, projectionMatrix);
         }
         PROFILE.push("portals@r" + recursion);
 
         mc.levelRenderer.renderBuffers.bufferSource().endBatch();
 
+        List<PortalEntity> portalsToRender = recursion == 0 && shouldUsePortalPerformanceOptimizations()
+                ? topLevelPortalCandidates
+                : getFramePortalEntities(level);
+        if(recursion == 0 && portalsToRender.isEmpty()) {
+            PROFILE.pop();
+            if(isOuter) {
+                PROFILE.pop();
+                PROFILE.snapshotInto(net.portalmod.core.event.ClientEvents.debugStrings);
+            }
+            return;
+        }
+
         if(recursion == 0) {
+            if(!ensureMainFramebufferStencil(mainFBO)) {
+                PROFILE.pop();
+                if(isOuter) {
+                    PROFILE.pop();
+                    PROFILE.snapshotInto(net.portalmod.core.event.ClientEvents.debugStrings);
+                }
+                return;
+            }
+
             currentlyRenderingPortals = true;
-            fabulousGraphics = mc.options.graphicsMode == GraphicsFanciness.FABULOUS;
+            fabulousGraphics = shouldUseShaderTransparency(mc);
 
             if(fabulousGraphics) {
-                int w = mc.getWindow().getWidth();
-                int h = mc.getWindow().getHeight();
-
-                if(tempFBO.width != w || tempFBO.height != h)
-                    tempFBO.resize(w, h, Minecraft.ON_OSX);
-
-                tempFBO.enableStencil();
-                tempFBO.bindWrite(false);
+                tempFBO.bindWrite(true);
                 GL11.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             }
 
-            mainFBO.bindWrite(false);
+            mainFBO.bindWrite(true);
             GL11.glEnable(GL_STENCIL_TEST);
             RenderSystem.stencilMask(0x80);
             RenderSystem.clear(GL_STENCIL_BUFFER_BIT, false);
         }
 
         renderedPortals = 0;
-
-        for(Entity entity : level.entitiesForRendering()) {
-            if(entity instanceof PortalEntity) {
-                PROFILE.push("renderPortal");
-                renderPortal((PortalEntity)entity, camera, clippingHelper, projectionMatrix, partialTicks, fabulousGraphics);
-                PROFILE.pop();
-                renderedPortals++;
-            }
+        for(PortalEntity portal : portalsToRender) {
+            PROFILE.push("renderPortal");
+            renderPortal(portal, camera, clippingHelper, projectionMatrix, partialTicks, fabulousGraphics);
+            PROFILE.pop();
+            renderedPortals++;
         }
 
         if(recursion == 0) {
@@ -445,25 +942,41 @@ public class PortalRenderer {
         if(fabulousGraphics) {
             PROFILE.push("fabulousBlit@r" + recursion);
             blitFBOtoFBO(mainFBO, tempFBO);
-            tempFBO.copyDepthFrom(mainFBO);
-            mainFBO.bindWrite(false);
+            mainFBO.bindWrite(true);
             PROFILE.pop();
         }
 
-        if(PortalModConfigManager.HIGHLIGHTS.get()) {
+        if(recursion == 0 && PortalModConfigManager.HIGHLIGHTS.get()) {
             PROFILE.push("highlights");
             renderHighlights(camera, projectionMatrix);
             PROFILE.pop();
         }
 
         if(recursion == 0 && !fabulousGraphics) {
-            mainFBO.bindWrite(false);
+            mainFBO.bindWrite(true);
             GL11.glEnable(GL_STENCIL_TEST);
             RenderSystem.stencilMask(0xFF);
             RenderSystem.clear(GL_STENCIL_BUFFER_BIT, false);
         }
 
         GL11.glEnable(GL_ALPHA_TEST);
+        if(recursion == 0) {
+            mainFBO.bindWrite(true);
+            glDisable(GL_CLIP_PLANE0);
+            GL11.glDisable(GL_STENCIL_TEST);
+            RenderSystem.stencilMask(~0);
+            RenderSystem.stencilFunc(GL_ALWAYS, 0, 0xFF);
+            RenderSystem.stencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+            RenderSystem.colorMask(true, true, true, true);
+            RenderSystem.enableDepthTest();
+            RenderSystem.depthFunc(GL_LESS);
+            RenderSystem.depthMask(true);
+            RenderSystem.disableBlend();
+            RenderSystem.defaultBlendFunc();
+            RenderSystem.enableCull();
+            RenderSystem.activeTexture(GL_TEXTURE0);
+            RenderSystem.bindTexture(0);
+        }
 
         PROFILE.pop();
         if(isOuter) {
@@ -474,17 +987,16 @@ public class PortalRenderer {
 
     private boolean discardPortal(PortalEntity portal, ActiveRenderInfo camera, ClippingHelper clippingHelper, Matrix4f projectionMatrix) {
         Vec3 cameraPos = new Vec3(camera.getPosition());
-        Vec3 portalPos = new Vec3(portal.position());
-        Vec3 portalToCamera = cameraPos.sub(portalPos);
-        Vec3 portalNormal = new Vec3(portal.getDirection());
+        double distanceSqr = distanceToCameraSqr(portal, cameraPos);
 
         // discard portals facing away from camera
-        if(portalToCamera.magnitude() > 1 && portalToCamera.clone().normalize().dot(portalNormal) < 0)
+        if(isPortalFacingAwayFromCamera(portal, cameraPos))
             return true;
 
         // discard portals behind parent portal
         if(!portalStack.isEmpty()) {
             PortalEntity parentPortal = portalStack.peek();
+            Vec3 portalPos = new Vec3(portal.position());
             Vec3 parentPortalPos = new Vec3(parentPortal.position());
             Vec3 parentPortalNormal = new Vec3(parentPortal.getDirection());
             Vec3 parentPortalPosWithMargin = parentPortalPos.clone().sub(parentPortalNormal.clone().mul(2));
@@ -498,17 +1010,17 @@ public class PortalRenderer {
         }
 
         // discard portals outside view frustum
-        if(portalToCamera.magnitude() > 1 && !clippingHelper.isVisible(portal.getBoundingBox()))
+        if(distanceSqr > 1.0D && !clippingHelper.isVisible(portal.getBoundingBox()))
             return true;
 
-        // Portal-edge frustum narrowing: at recursion >= 1 we know no pixel outside
-        // the parent portal's screen-space silhouette can pass the stencil test, so
-        // any child portal whose NDC bounding rect does not intersect the current
-        // parent rect is invisible no matter how we render it. Skip at r=0 (parent
-        // rect is the full screen) and whenever the camera is dangerously close to
-        // the portal plane (w-divide becomes unstable).
-        if(recursion >= 1 && portalToCamera.magnitude() > 1.5) {
-            float[] rect = computePortalNdcRect(portal, camera, projectionMatrix);
+        // Screen-space portal culling: if the projected portal quad does not intersect
+        // the currently reachable screen-space rect, the stencil path cannot possibly
+        // contribute pixels. At the outer frame the parent rect is the full screen,
+        // and in nested passes it is the already-clipped parent portal silhouette.
+        // Skip only when dangerously close to the portal plane, where projection can
+        // straddle the near plane and become numerically unstable.
+        if(distanceSqr > 2.25D) {
+            float[] rect = getPortalNdcRectCached(portal, camera, projectionMatrix);
             if(rect != null && !rectsIntersect(rect, currentParentNdcRect)) {
                 portalsCulledByNdcRect++;
                 return true;
@@ -517,14 +1029,44 @@ public class PortalRenderer {
         return false;
     }
 
+    private static boolean cameraChangedForPortalProjection(PortalProjectionCacheEntry entry, ActiveRenderInfo camera) {
+        Vector3d currentPos = camera.getPosition();
+        if(entry.cameraPos == null || entry.cameraPos.distanceToSqr(currentPos) > 1.0E-6)
+            return true;
+        return Math.abs(MathHelper.wrapDegrees(entry.xRot - camera.getXRot())) > 0.01F
+                || Math.abs(MathHelper.wrapDegrees(entry.yRot - camera.getYRot())) > 0.01F;
+    }
+
+    @Nullable
+    private float[] getPortalNdcRectCached(PortalEntity portal, ActiveRenderInfo camera, Matrix4f projectionMatrix) {
+        PortalProjectionCacheEntry cached = portalProjectionCache.get(portal.getUUID());
+        if(cached != null
+                && cached.frameId == portalProjectionFrameId
+                && !cameraChangedForPortalProjection(cached, camera)) {
+            return cached.rect;
+        }
+
+        PortalProjectionCacheEntry updated = new PortalProjectionCacheEntry();
+        updated.frameId = portalProjectionFrameId;
+        updated.cameraPos = camera.getPosition();
+        updated.xRot = camera.getXRot();
+        updated.yRot = camera.getYRot();
+        updated.rect = computePortalNdcRect(portal, camera, projectionMatrix);
+        portalProjectionCache.put(portal.getUUID(), updated);
+        return updated.rect;
+    }
+
     /**
-     * Project the portal's AABB corners through {@code projection * view} and return
-     * an NDC-space bounding rect {@code {xMin, yMin, xMax, yMax}}. Returns {@code null}
-     * when the AABB straddles the near plane (any corner has w &lt;= epsilon), in which
-     * case the caller should skip NDC-based culling to avoid false positives.
+     * Project the actual portal surface quad through {@code projection * view} and return
+     * an NDC-space bounding rect {@code {xMin, yMin, xMax, yMax}}. Using the portal quad
+     * instead of the entity AABB avoids severe overestimation at grazing angles, which
+     * would otherwise make tiny side-on portals look much more important than they are.
+     *
+     * <p>Returns {@code null} when the quad straddles the near plane (any corner has
+     * {@code w <= epsilon}), in which case the caller should skip NDC-based culling to
+     * avoid false positives.
      */
     private float[] computePortalNdcRect(PortalEntity portal, ActiveRenderInfo camera, Matrix4f projectionMatrix) {
-        AxisAlignedBB bb = portal.getBoundingBox();
         Matrix4f view = getViewMatrix(camera);
         Matrix4f mvp = projectionMatrix.copy();
         mvp.multiply(view);
@@ -532,24 +1074,26 @@ public class PortalRenderer {
         float xMin =  Float.POSITIVE_INFINITY, yMin =  Float.POSITIVE_INFINITY;
         float xMax = Float.NEGATIVE_INFINITY, yMax = Float.NEGATIVE_INFINITY;
 
-        double[] xs = {bb.minX, bb.maxX};
-        double[] ys = {bb.minY, bb.maxY};
-        double[] zs = {bb.minZ, bb.maxZ};
-        for(double x : xs) {
-            for(double y : ys) {
-                for(double z : zs) {
-                    Vector4f corner = new Vector4f((float)x, (float)y, (float)z, 1f);
-                    corner.transform(mvp);
-                    float w = corner.w();
-                    if(w <= 0.01f) return null;
-                    float nx = corner.x() / w;
-                    float ny = corner.y() / w;
-                    if(nx < xMin) xMin = nx;
-                    if(nx > xMax) xMax = nx;
-                    if(ny < yMin) yMin = ny;
-                    if(ny > yMax) yMax = ny;
-                }
-            }
+        Mat4 model = PortalEntity.setupMatrix(portal.getDirection(), portal.getUpVector(), portal.getPivotPoint());
+        Vec3[] corners = new Vec3[]{
+                new Vec3(0, 0, 0).transform(model),
+                new Vec3(1, 0, 0).transform(model),
+                new Vec3(1, 2, 0).transform(model),
+                new Vec3(0, 2, 0).transform(model)
+        };
+
+        for(Vec3 cornerPos : corners) {
+            Vector4f corner = new Vector4f((float)cornerPos.x, (float)cornerPos.y, (float)cornerPos.z, 1f);
+            corner.transform(mvp);
+            float w = corner.w();
+            if(w <= 0.01f)
+                return null;
+            float nx = corner.x() / w;
+            float ny = corner.y() / w;
+            if(nx < xMin) xMin = nx;
+            if(nx > xMax) xMax = nx;
+            if(ny < yMin) yMin = ny;
+            if(ny > yMax) yMax = ny;
         }
 
         if(xMin < -1f) xMin = -1f;
@@ -566,6 +1110,7 @@ public class PortalRenderer {
     private static final int PORTAL_OPENING_GRID_W = 8;
     private static final int PORTAL_OPENING_GRID_H = 16;
     private static final int PORTAL_OPENING_CONTROL_POINT_COUNT = PORTAL_OPENING_GRID_W * PORTAL_OPENING_GRID_H;
+    private final Vector3d[] portalOpeningScratch = new Vector3d[PORTAL_OPENING_CONTROL_POINT_COUNT];
 
     /**
      * World-space sample points on the portal opening laid out in a {@link #PORTAL_OPENING_GRID_W}×{@link #PORTAL_OPENING_GRID_H}
@@ -599,6 +1144,21 @@ public class PortalRenderer {
         if(dim <= 1)
             return 0;
         return -1.0 + 2.0 * index / (dim - 1);
+    }
+
+    private static int portalOpeningGridIndex(int row, int col) {
+        return row * PORTAL_OPENING_GRID_W + col;
+    }
+
+    private static boolean isPortalOpeningProbeIndex(int index) {
+        int midRow = PORTAL_OPENING_GRID_H / 2;
+        int midCol = PORTAL_OPENING_GRID_W / 2;
+        return index == portalOpeningGridIndex(0, 0)
+                || index == portalOpeningGridIndex(0, PORTAL_OPENING_GRID_W - 1)
+                || index == portalOpeningGridIndex(PORTAL_OPENING_GRID_H - 1, 0)
+                || index == portalOpeningGridIndex(PORTAL_OPENING_GRID_H - 1, PORTAL_OPENING_GRID_W - 1)
+                || index == portalOpeningGridIndex(midRow, midCol)
+                || index == portalOpeningGridIndex(Math.max(0, midRow - 1), Math.max(0, midCol - 1));
     }
 
     private static boolean blockCountsAsOpaqueForPortalSight(BlockState state) {
@@ -685,7 +1245,7 @@ public class PortalRenderer {
         if(viewer == null)
             viewer = Minecraft.getInstance().player;
 
-        Vector3d[] points = new Vector3d[PORTAL_OPENING_CONTROL_POINT_COUNT];
+        Vector3d[] points = portalOpeningScratch;
         portalOpeningControlPoints(portal, points);
 
         // Rate-limit debug particles to once per game tick per portal so the HUD
@@ -702,12 +1262,22 @@ public class PortalRenderer {
         }
 
         boolean anyVisible = false;
-        for(Vector3d p : points) {
-            boolean v = cornerVisibleAlongRay(world, from, p, viewer, emitDebugParticles);
-            if(v) {
+        if(!emitDebugParticles) {
+            for(int i = 0; i < points.length; i++) {
+                if(!isPortalOpeningProbeIndex(i))
+                    continue;
+                if(cornerVisibleAlongRay(world, from, points[i], viewer, false))
+                    return false;
+            }
+        }
+
+        for(int i = 0; i < points.length; i++) {
+            if(!emitDebugParticles && isPortalOpeningProbeIndex(i))
+                continue;
+
+            boolean visible = cornerVisibleAlongRay(world, from, points[i], viewer, emitDebugParticles);
+            if(visible) {
                 anyVisible = true;
-                // Without particles we can early-out on the first visible sample. When
-                // debug particles are on we keep going so every corner gets coloured.
                 if(!emitDebugParticles)
                     return false;
             }
@@ -728,7 +1298,80 @@ public class PortalRenderer {
         return new float[]{xMin, yMin, xMax, yMax};
     }
 
-    private void finishPortalEntity(PortalEntity portal, ActiveRenderInfo camera, float partialTicks, boolean fabulousGraphics) {
+    private static float portalCoverageFromRect(@Nullable float[] rect) {
+        if(rect == null)
+            return 1F;
+        float width = Math.max(0F, rect[2] - rect[0]);
+        float height = Math.max(0F, rect[3] - rect[1]);
+        return MathHelper.clamp((width * height) * 0.25F, 0F, 1F);
+    }
+
+    private float getOcclusionCacheRelaxation(float portalCoverage, boolean fullyOccluded) {
+        if(!shouldUsePortalPerformanceOptimizations())
+            return 0.0F;
+
+        if(!fullyOccluded)
+            return 0.0F;
+
+        float coverageRelaxation = 1.0F - (float)Math.sqrt(Math.max(portalCoverage, 0.0F));
+        float motionRelaxation = fastCameraMotionFactor * 0.85F;
+        return MathHelper.clamp(Math.max(coverageRelaxation, motionRelaxation), 0.0F, 1.0F);
+    }
+
+    private boolean cameraChangedTooMuchForOcclusionCache(PortalOcclusionCacheEntry entry, ActiveRenderInfo camera, float portalCoverage) {
+        float relaxation = getOcclusionCacheRelaxation(portalCoverage, entry.fullyOccluded);
+        double posDeltaSqr = MathHelper.lerp(relaxation,
+                OCCLUSION_CACHE_CAMERA_POS_DELTA_SQR,
+                OCCLUSION_CACHE_CAMERA_POS_DELTA_SQR_MAX);
+        float rotDelta = MathHelper.lerp(relaxation,
+                OCCLUSION_CACHE_CAMERA_ROT_DELTA,
+                OCCLUSION_CACHE_CAMERA_ROT_DELTA_MAX);
+
+        Vector3d currentPos = camera.getPosition();
+        if(entry.cameraPos == null || entry.cameraPos.distanceToSqr(currentPos) > posDeltaSqr)
+            return true;
+        return Math.abs(MathHelper.wrapDegrees(entry.xRot - camera.getXRot())) > rotDelta
+                || Math.abs(MathHelper.wrapDegrees(entry.yRot - camera.getYRot())) > rotDelta;
+    }
+
+    private long getOcclusionCacheTicks(PortalOcclusionCacheEntry entry, float portalCoverage) {
+        float relaxation = getOcclusionCacheRelaxation(portalCoverage, entry.fullyOccluded);
+        return Math.round(MathHelper.lerp(relaxation, (float)OCCLUSION_CACHE_TICKS, (float)OCCLUSION_CACHE_MAX_TICKS));
+    }
+
+    private boolean portalOpeningFullyOccludedCached(PortalEntity portal, ActiveRenderInfo camera, float portalCoverage) {
+        ClientWorld world = Minecraft.getInstance().level;
+        if(world == null)
+            return false;
+
+        long gameTime = world.getGameTime();
+        PortalOcclusionCacheEntry cached = portalOcclusionCache.get(portal.getUUID());
+        if(cached != null
+                && gameTime - cached.gameTime <= getOcclusionCacheTicks(cached, portalCoverage)
+                && !cameraChangedTooMuchForOcclusionCache(cached, camera, portalCoverage)) {
+            return cached.fullyOccluded;
+        }
+
+        boolean fullyOccluded = portalOpeningFullyOccluded(portal, camera);
+        PortalOcclusionCacheEntry updated = new PortalOcclusionCacheEntry();
+        updated.gameTime = gameTime;
+        updated.cameraPos = camera.getPosition();
+        updated.xRot = camera.getXRot();
+        updated.yRot = camera.getYRot();
+        updated.fullyOccluded = fullyOccluded;
+        portalOcclusionCache.put(portal.getUUID(), updated);
+        return fullyOccluded;
+    }
+
+    private void finishCulledPortalEntity() {
+        if(PortalMod.DEBUG)
+            GL43.glPopDebugGroup();
+
+        this.portalChain.removeLast();
+        recursion--;
+    }
+
+    private void finishPortalEntity(ActiveRenderInfo camera, float partialTicks, boolean fabulousGraphics, boolean restoreFogState) {
         if(fabulousGraphics)
             GL11.glDisable(GL_STENCIL_TEST);
 
@@ -738,13 +1381,8 @@ public class PortalRenderer {
             glDisable(GL_CLIP_PLANE0);
         }
 
-        ActiveRenderInfo fogCamera = camera;
-        if(portal.getOtherPortal().isPresent()) {
-            fogCamera = new PortalCamera(camera, partialTicks);
-            fogCamera.setPosition(portal.getOtherPortal().get().position());
-        }
-
-        setupSkyAndFog(fogCamera, partialTicks);
+        if(restoreFogState)
+            setupSkyAndFog(camera, partialTicks);
 
         if(PortalMod.DEBUG)
             GL43.glPopDebugGroup();
@@ -793,7 +1431,7 @@ public class PortalRenderer {
 
         RenderSystem.activeTexture(GL_TEXTURE0);
         src.bindRead();
-        dest.bindWrite(false);
+        dest.bindWrite(true);
         blitQuad.render();
 
         RenderSystem.enableDepthTest();
@@ -838,18 +1476,24 @@ public class PortalRenderer {
         if(culled) {
             if(PROFILE.enabled)
                 PROFILE.portalsCulled++;
-            finishPortalEntity(portal, camera, partialTicks, fabulousGraphics);
+            markPortalCulled(portal);
+            finishCulledPortalEntity();
             return;
         }
 
         // Four-corner ray occlusion only for the outermost portal pass (recursion 1 after increment).
         // Nested renderLevel uses PortalCamera; established discard/stencil/nesting handles those.
-        boolean openingOccluded = recursion == 1 && portalOpeningFullyOccluded(portal, camera);
+        float[] portalRect = getPortalNdcRectCached(portal, camera, projectionMatrix);
+        float portalCoverage = portalCoverageFromRect(portalRect);
+
+        boolean openingOccluded = recursion == 1 && portalOpeningFullyOccludedCached(portal, camera, portalCoverage);
         if(openingOccluded) {
             portalsStencilSkippedOccludedRays++;
-            finishPortalEntity(portal, camera, partialTicks, fabulousGraphics);
+            markPortalCulled(portal);
+            finishCulledPortalEntity();
             return;
         }
+        markPortalRendered(portal);
 
         Minecraft mc = Minecraft.getInstance();
         Framebuffer mainFBO = mc.getMainRenderTarget();
@@ -860,23 +1504,10 @@ public class PortalRenderer {
         Matrix4f modelView = viewMatrix.copy();
         modelView.multiply(modelMatrix);
 
+        boolean canNestRender = false;
         {
             GL11.glEnable(GL_STENCIL_TEST);
             Optional<PortalEntity> otherPortalOptional = portal.getOtherPortal();
-
-            MatrixStack matrixStack = new MatrixStack();
-            ActiveRenderInfo portalCamera = setupCamera(camera, portal, partialTicks);
-            setupMatrixStack(matrixStack, portalCamera);
-            setupSkyAndFog(portalCamera, partialTicks);
-
-            ActiveRenderInfo fogCamera = portalCamera;
-            if(portal.getOtherPortal().isPresent()) {
-                fogCamera = new PortalCamera(portalCamera, partialTicks);
-                fogCamera.setPosition(portal.getOtherPortal().get().position());
-            }
-
-            FogRenderer.setupColor(fogCamera, partialTicks, mc.level, mc.options.renderDistance,
-                    mc.gameRenderer.getDarkenWorldAmount(partialTicks));
 
             RenderSystem.stencilMask(0x7F);
             RenderSystem.stencilFunc(GL_EQUAL, recursion - 1, 0x7F);
@@ -892,10 +1523,15 @@ public class PortalRenderer {
             renderBackground();
             PROFILE.pop();
 
-            boolean canNestRender = otherPortalOptional.isPresent() && !isDeepest();
+            canNestRender = otherPortalOptional.isPresent() && !isDeepest();
 
             if(canNestRender) {
                 PortalEntity otherPortal = otherPortalOptional.get();
+                MatrixStack matrixStack = new MatrixStack();
+                ActiveRenderInfo portalCamera = setupCamera(camera, portal, partialTicks);
+                setupMatrixStack(matrixStack, portalCamera);
+                setupSkyAndFog(portalCamera, partialTicks);
+
                 portalStack.push(otherPortal);
 
                 // Narrow the screen-space clip region to this portal's silhouette
@@ -905,7 +1541,6 @@ public class PortalRenderer {
                         currentParentNdcRect[0], currentParentNdcRect[1],
                         currentParentNdcRect[2], currentParentNdcRect[3]};
                 parentNdcRectStack.push(savedParentNdcRect);
-                float[] portalRect = computePortalNdcRect(portal, camera, projectionMatrix);
                 if(portalRect != null) {
                     float[] narrowed = intersectRect(savedParentNdcRect, portalRect);
                     if(narrowed != null) {
@@ -926,13 +1561,15 @@ public class PortalRenderer {
                         : PMState.cameraPosOverrideForRenderingSelf.clone().transform(PortalEntity.getPortalToPortalMatrix(portal, otherPortal));
 
                 PROFILE.push("saveRenderChunks");
-                ObjectList<WorldRenderer.LocalRenderInformationContainer> renderChunks = new ObjectArrayList<>();
+                ObjectList<WorldRenderer.LocalRenderInformationContainer> renderChunks = acquireRenderChunkSnapshot();
                 renderChunks.addAll(mc.levelRenderer.renderChunks);
                 PROFILE.pop();
 
                 boolean renderOutline = this.shouldRenderOutline(portalChain);
                 if(PROFILE.enabled)
                     PROFILE.portalsNested++;
+                NestedRenderSettings nestedSettings = buildNestedRenderSettings(portal, portalCoverage);
+                nestedRenderSettingsStack.addLast(nestedSettings);
 
                 // Shorter BFS for the nested chunk walk. In 1.16.5, setupRender's BFS grid
                 // iterates +/- lastViewDistance around the camera chunk, so clamping that
@@ -948,8 +1585,48 @@ public class PortalRenderer {
                 // the shrinking silhouette, so we shrink the chunk-walk seed grid
                 // geometrically. At r=1: /2, r=2: /4, r=3: /8, ... — mirrors
                 // Source engine's portal-aware PVS pruning without needing a PVS.
-                int shift = Math.min(recursion, 5);
-                int clampedDistance = Math.max(2, origLastViewDistance >> shift);
+                int clampedDistance = origLastViewDistance;
+                if(shouldUsePortalPerformanceOptimizations()) {
+                    // Gentler recursion falloff: r=1 keeps (almost) full distance so the
+                    // primary portal view looks like a real window into the world, then
+                    // deeper nested renders shrink faster to keep fan-out bounded.
+                    // r=1: *0.90  r=2: *0.55  r=3: *0.30  r=4: *0.15  r>=5: *0.08
+                    float recursionScale;
+                    switch(recursion) {
+                        case 0:  recursionScale = 1.00F; break;
+                        case 1:  recursionScale = 0.90F; break;
+                        case 2:  recursionScale = 0.55F; break;
+                        case 3:  recursionScale = 0.30F; break;
+                        case 4:  recursionScale = 0.15F; break;
+                        default: recursionScale = 0.08F; break;
+                    }
+                    // Coverage scaling: a softer exponent and higher floor so a portal
+                    // covering e.g. 10% of screen still gets ~55% view distance instead
+                    // of ~23%. Tiny portals still clamp down, just not nearly as hard.
+                    float coverageScale = Math.max((float)Math.pow(Math.max(portalCoverage, NESTED_PORTAL_MIN_COVERAGE), 0.4F), 0.4F);
+                    if(recursion >= 3)
+                        coverageScale = Math.max(0.2F, coverageScale * 0.85F);
+                    if(fastCameraMotionFactor > 0.0F) {
+                        float motionScale = MathHelper.lerp(fastCameraMotionFactor, 1.0F, recursion >= 2 ? 0.55F : 0.75F);
+                        coverageScale = Math.max(0.2F, coverageScale * motionScale);
+                    }
+                    // Absolute chunk floor: never shrink below this, so even worst-case
+                    // clamps still show a useful chunk of the far world for building /
+                    // test-chamber work.
+                    final int minChunks = recursion <= 1 ? 10 : (recursion == 2 ? 7 : 5);
+                    int recursionDistance = Math.max(minChunks, Math.round(origLastViewDistance * recursionScale));
+                    int coverageDistance  = Math.max(minChunks, Math.round(origLastViewDistance * coverageScale));
+                    if(fastCameraMotionFactor >= FAST_CAMERA_HARD_CLAMP_START) {
+                        float t = (fastCameraMotionFactor - FAST_CAMERA_HARD_CLAMP_START) / (1.0F - FAST_CAMERA_HARD_CLAMP_START);
+                        // Softer fast-motion hard clamp: 14 -> 8 (r<=1) / 5 (r>=2) chunks
+                        // instead of 6 -> 2. Keeps big rooms visible while sprinting.
+                        int hardClampDistance = Math.max(minChunks, Math.round(MathHelper.lerp(t, 14.0F, recursion >= 2 ? 5.0F : 8.0F)));
+                        coverageDistance = Math.min(coverageDistance, hardClampDistance);
+                    }
+                    clampedDistance = Math.max(minChunks, Math.min(recursionDistance, coverageDistance));
+                    // Never clamp *up* past the player's real render distance.
+                    clampedDistance = Math.min(clampedDistance, origLastViewDistance);
+                }
                 boolean distanceClamped = clampedDistance < origLastViewDistance;
                 int previousOverride = nestedBfsDistanceOverride;
                 if(distanceClamped) {
@@ -962,21 +1639,27 @@ public class PortalRenderer {
                     mc.levelRenderer.renderLevel(matrixStack, partialTicks, Util.getNanos(), renderOutline, portalCamera,
                             mc.gameRenderer, mc.gameRenderer.lightTexture, projectionMatrix);
                 } finally {
+                    nestedRenderSettingsStack.removeLast();
                     if(distanceClamped) {
                         lvlAcc.pmSetLastViewDistance(origLastViewDistance);
                         nestedBfsDistanceOverride = previousOverride;
                     }
                     PROFILE.pop();
                 }
+                mainFBO.bindWrite(true);
 
                 PROFILE.push("restoreRenderChunks");
-                mc.levelRenderer.needsUpdate = true;
-                mc.levelRenderer.renderChunks.clear();
-                mc.levelRenderer.renderChunks.addAll(renderChunks);
+                try {
+                    mc.levelRenderer.needsUpdate = true;
+                    mc.levelRenderer.renderChunks.clear();
+                    mc.levelRenderer.renderChunks.addAll(renderChunks);
 
-                TileEntityRendererDispatcher.instance.prepare(portal.level, mc.getTextureManager(), mc.font, camera, mc.hitResult);
-                mc.levelRenderer.entityRenderDispatcher.prepare(portal.level, camera, mc.crosshairPickEntity);
-                PROFILE.pop();
+                    TileEntityRendererDispatcher.instance.prepare(portal.level, mc.getTextureManager(), mc.font, camera, mc.hitResult);
+                    mc.levelRenderer.entityRenderDispatcher.prepare(portal.level, camera, mc.crosshairPickEntity);
+                } finally {
+                    releaseRenderChunkSnapshot(renderChunks);
+                    PROFILE.pop();
+                }
 
                 currentCamera = camera;
                 PMState.cameraPosOverrideForRenderingSelf = oldCameraPosOverrideForRenderingSelf;
@@ -997,8 +1680,7 @@ public class PortalRenderer {
                     RenderSystem.stencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
                     PROFILE.push("fabulousBlit(nested)");
                     blitFBOtoFBO(tempFBO, mainFBO);
-                    mainFBO.copyDepthFrom(tempFBO);
-                    mainFBO.bindWrite(false);
+                    mainFBO.bindWrite(true);
                     PROFILE.pop();
                 }
             }
@@ -1035,7 +1717,7 @@ public class PortalRenderer {
             }
         }
 
-        finishPortalEntity(portal, camera, partialTicks, fabulousGraphics);
+        finishPortalEntity(camera, partialTicks, fabulousGraphics, canNestRender);
     }
 
     public boolean shouldRenderOutline(@Nullable Deque<PortalEntity> portalChain) {
@@ -1062,14 +1744,22 @@ public class PortalRenderer {
     }
 
     public void renderHighlights(ActiveRenderInfo camera, Matrix4f projectionMatrix) {
+        ClientWorld level = Minecraft.getInstance().level;
+        ClientPlayerEntity player = Minecraft.getInstance().player;
+        if(level == null || player == null)
+            return;
+
+        ItemStack item = player.getMainHandItem();
+        Optional<UUID> gunUUID = PortalGun.getUUID(item);
+        if(!(item.getItem() instanceof PortalGun) || !gunUUID.isPresent())
+            return;
+
         if(PortalMod.DEBUG)
             GL43.glPushDebugGroup(GL43.GL_DEBUG_SOURCE_APPLICATION, 0, "Highlights");
 
-        ClientWorld level = Minecraft.getInstance().level;
-        ClientPlayerEntity player = Minecraft.getInstance().player;
-
-        if(level == null || player == null)
-            return;
+        Vector3d cameraPos = currentCamera != null
+                ? currentCamera.getPosition()
+                : Minecraft.getInstance().gameRenderer.getMainCamera().getPosition();
 
         GL11.glEnable(GL_STENCIL_TEST);
         RenderSystem.stencilMask(0);
@@ -1083,18 +1773,8 @@ public class PortalRenderer {
         RenderSystem.depthMask(false);
         RenderSystem.disableCull();
 
-        for(Entity entity : level.entitiesForRendering()) {
-            if(!(entity instanceof PortalEntity))
-                continue;
-
-            PortalEntity portal = (PortalEntity)entity;
-            Vector3d cameraPos = Minecraft.getInstance().gameRenderer.getMainCamera().getPosition();
-            if(currentCamera != null)
-                cameraPos = currentCamera.getPosition();
-
-            ItemStack item = player.getMainHandItem();
-            Optional<UUID> gunUUID = PortalGun.getUUID(item);
-            if (!(item.getItem() instanceof PortalGun) || !gunUUID.isPresent() || !gunUUID.get().equals(portal.getGunUUID()))
+        for(PortalEntity portal : getFramePortalEntities(level)) {
+            if(!gunUUID.get().equals(portal.getGunUUID()))
                 continue;
 
             Matrix4f model = getModelMatrix(portal, camera, portal.getWallAttachmentDistance(camera) * 3);

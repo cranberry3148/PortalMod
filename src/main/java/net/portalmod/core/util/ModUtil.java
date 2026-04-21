@@ -16,6 +16,7 @@ import net.minecraft.util.math.BlockRayTraceResult;
 import net.minecraft.util.math.RayTraceContext;
 import net.minecraft.util.math.shapes.VoxelShape;
 import net.minecraft.util.math.vector.Vector3d;
+import net.minecraft.util.math.vector.Vector3f;
 import net.minecraft.util.math.vector.Vector3i;
 import net.minecraft.util.text.*;
 import net.minecraft.world.IBlockReader;
@@ -27,6 +28,7 @@ import net.portalmod.core.math.Mat4;
 import net.portalmod.core.math.Vec3;
 
 import java.util.*;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
@@ -85,24 +87,37 @@ public class ModUtil {
         int limit = 100;
         while(limit-- > 0) {
             AxisAlignedBB rayAABB = new AxisAlignedBB(from.to3d(), to.to3d());
+            Vector3d fromVec = from.to3d();
+            Vector3d toVec = to.to3d();
+            PortalEntity closestPortal = null;
+            double closestDistanceSqr = Double.MAX_VALUE;
+            for(PortalEntity candidate : PortalEntity.getPortals(level, rayAABB, filter)) {
+                double distanceSqr = candidate.position().distanceToSqr(fromVec);
+                if(distanceSqr < closestDistanceSqr) {
+                    closestPortal = candidate;
+                    closestDistanceSqr = distanceSqr;
+                }
+            }
 
-            Vec3 finalFrom = from.clone();
-            Optional<PortalEntity> optionalPortal = PortalEntity.getPortals(level, rayAABB, filter)
-                    .stream().reduce((o, n) ->
-                            n.position().distanceTo(finalFrom.to3d()) < o.position().distanceTo(finalFrom.to3d()) ? n : o);
-
-            if(!optionalPortal.isPresent())
+            if(closestPortal == null)
                 break;
 
-            PortalEntity portal = optionalPortal.get();
+            PortalEntity portal = closestPortal;
             AxisAlignedBB clipAABB = portal.getBoundingBox().move(new Vec3(portal.getNormal()).mul(-1/16f).to3d());
-            boolean traversesPortal = clipAABB.clip(from.to3d(), to.to3d()).isPresent();
+            boolean traversesPortal = clipAABB.clip(fromVec, toVec).isPresent();
 
             if(!traversesPortal)
                 break;
 
-            boolean rightDirection = from.clone().sub(portal.position()).dot(portal.getNormal()) > 0
-                    && to.clone().sub(portal.position()).dot(portal.getNormal()) < 0;
+            Vector3d portalPos = portal.position();
+            Vector3f portalNormal = portal.getNormal();
+            double fromDot = (from.x - portalPos.x) * portalNormal.x()
+                    + (from.y - portalPos.y) * portalNormal.y()
+                    + (from.z - portalPos.z) * portalNormal.z();
+            double toDot = (to.x - portalPos.x) * portalNormal.x()
+                    + (to.y - portalPos.y) * portalNormal.y()
+                    + (to.z - portalPos.z) * portalNormal.z();
+            boolean rightDirection = fromDot > 0 && toDot < 0;
 
             if(!rightDirection)
                 break;
@@ -255,7 +270,7 @@ public class ModUtil {
     }
 
     public static float symmetricRandom(float width) {
-        return new Random().nextFloat() * width * 2 - width;
+        return ThreadLocalRandom.current().nextFloat() * width * 2 - width;
     }
 
     public static float symmetricRandom() {

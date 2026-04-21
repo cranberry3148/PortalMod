@@ -55,7 +55,6 @@ public class ClientModEvents {
         ClientSkinManager.getInstance().onClientStartup();
 
         KeyInit.init();
-        Minecraft.getInstance().getMainRenderTarget().enableStencil();
 
         RenderTypeLookup.setRenderLayer(BlockInit.ANTLINE.get(),                 RenderType.cutout());
 //        RenderTypeLookup.setRenderLayer(BlockInit.LASER_EMITTER.get(),           RenderType.cutout());
