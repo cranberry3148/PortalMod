@@ -1004,7 +1004,10 @@ public class PortalRenderer {
                 // geometrically. At r=1: /2, r=2: /4, r=3: /8, ... — mirrors
                 // Source engine's portal-aware PVS pruning without needing a PVS.
                 int shift = Math.min(recursion, 5);
-                int clampedDistance = Math.max(2, origLastViewDistance >> shift);
+                float coverageScale = Math.max((float)Math.sqrt(Math.max(portalCoverage, NESTED_PORTAL_MIN_COVERAGE)), 0.2F);
+                int recursionDistance = Math.max(2, origLastViewDistance >> shift);
+                int coverageDistance = Math.max(2, Math.round(origLastViewDistance * coverageScale));
+                int clampedDistance = Math.max(2, Math.min(recursionDistance, coverageDistance));
                 boolean distanceClamped = clampedDistance < origLastViewDistance;
                 int previousOverride = nestedBfsDistanceOverride;
                 if(distanceClamped) {
