@@ -14,6 +14,10 @@ import net.portalmod.mixins.accessors.CompiledChunkAccessor;
 import java.util.*;
 
 public class PortalTransparencyHandler {
+    private static final double CAMERA_SORT_POS_DELTA_SQR = 0.09;
+    private static final float CAMERA_SORT_ROT_DELTA = 2.0F;
+    private static final int CAMERA_SORT_MAX_SKIP_FRAMES = 6;
+
     public static final RenderType.State PORTAL_TRANSLUCENT_STATE = RenderType.State.builder()
             .setShadeModelState(new RenderState.ShadeModelState(true))
             .setLightmapState(new RenderState.LightmapState(true))
@@ -42,8 +46,42 @@ public class PortalTransparencyHandler {
     public static final RenderType PORTAL_TRANSLUCENT = RenderType.create("portal_translucent", DefaultVertexFormats.BLOCK, 7, 262144, true, true, PORTAL_TRANSLUCENT_STATE);
 
     private static final BufferBuilder bufferBuilder = new BufferBuilder(262144);
+    private static Vector3d lastPortalSortCameraPos;
+    private static float lastPortalSortXRot;
+    private static float lastPortalSortYRot;
+    private static int portalSortFrameCounter;
+    private static int lastPortalSortFrame = Integer.MIN_VALUE;
+
+    private static boolean shouldResortPortalTransparency(ActiveRenderInfo portalCamera) {
+        Vector3d currentPos = portalCamera.getPosition();
+        int frame = ++portalSortFrameCounter;
+
+        if(lastPortalSortCameraPos == null) {
+            lastPortalSortCameraPos = currentPos;
+            lastPortalSortXRot = portalCamera.getXRot();
+            lastPortalSortYRot = portalCamera.getYRot();
+            lastPortalSortFrame = frame;
+            return true;
+        }
+
+        boolean moved = lastPortalSortCameraPos.distanceToSqr(currentPos) > CAMERA_SORT_POS_DELTA_SQR;
+        boolean rotated = Math.abs(lastPortalSortXRot - portalCamera.getXRot()) > CAMERA_SORT_ROT_DELTA
+                || Math.abs(lastPortalSortYRot - portalCamera.getYRot()) > CAMERA_SORT_ROT_DELTA;
+        boolean frameExpired = frame - lastPortalSortFrame >= CAMERA_SORT_MAX_SKIP_FRAMES;
+        if(!(moved || rotated || frameExpired))
+            return false;
+
+        lastPortalSortCameraPos = currentPos;
+        lastPortalSortXRot = portalCamera.getXRot();
+        lastPortalSortYRot = portalCamera.getYRot();
+        lastPortalSortFrame = frame;
+        return true;
+    }
 
     public static void resortTransparency(ActiveRenderInfo portalCamera) {
+        if(!shouldResortPortalTransparency(portalCamera))
+            return;
+
         WorldRenderer lr = Minecraft.getInstance().levelRenderer;
         Queue<RegionRenderCacheBuilder> freeBuffers = ((ChunkRenderDispatcherAccessor)lr.chunkRenderDispatcher).pmGetFreeBuffers();
         if(!freeBuffers.isEmpty()) {
