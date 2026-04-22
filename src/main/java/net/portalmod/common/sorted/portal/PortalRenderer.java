@@ -150,6 +150,7 @@ public class PortalRenderer {
     private float lastOuterCameraXRot;
     private float lastOuterCameraYRot;
     private float fastCameraMotionFactor;
+    private boolean mainFramebufferStencilFailed;
 
     // --- profiler ---
     public static final Profile PROFILE = new Profile();
@@ -799,6 +800,22 @@ public class PortalRenderer {
         return created;
     }
 
+    private boolean ensureMainFramebufferStencil(Framebuffer mainFBO) {
+        if(mainFramebufferStencilFailed)
+            return false;
+        if(mainFBO.isStencilEnabled())
+            return true;
+
+        try {
+            mainFBO.enableStencil();
+            return mainFBO.isStencilEnabled();
+        } catch(RuntimeException exception) {
+            mainFramebufferStencilFailed = true;
+            PortalMod.LOGGER.error("Failed to enable stencil on the main framebuffer. Disabling portal rendering for this session.", exception);
+            return false;
+        }
+    }
+
     public void renderPortals(ClientWorld level, ActiveRenderInfo camera, ClippingHelper clippingHelper, Matrix4f projectionMatrix, float partialTicks) {
         Minecraft mc = Minecraft.getInstance();
         Framebuffer mainFBO = mc.getMainRenderTarget();
@@ -830,7 +847,26 @@ public class PortalRenderer {
 
         mc.levelRenderer.renderBuffers.bufferSource().endBatch();
 
+        List<PortalEntity> portalsToRender = recursion == 0 ? topLevelPortalCandidates : getFramePortalEntities(level);
+        if(recursion == 0 && portalsToRender.isEmpty()) {
+            PROFILE.pop();
+            if(isOuter) {
+                PROFILE.pop();
+                PROFILE.snapshotInto(net.portalmod.core.event.ClientEvents.debugStrings);
+            }
+            return;
+        }
+
         if(recursion == 0) {
+            if(!ensureMainFramebufferStencil(mainFBO)) {
+                PROFILE.pop();
+                if(isOuter) {
+                    PROFILE.pop();
+                    PROFILE.snapshotInto(net.portalmod.core.event.ClientEvents.debugStrings);
+                }
+                return;
+            }
+
             currentlyRenderingPortals = true;
             fabulousGraphics = mc.options.graphicsMode == GraphicsFanciness.FABULOUS;
 
@@ -853,7 +889,6 @@ public class PortalRenderer {
         }
 
         renderedPortals = 0;
-        List<PortalEntity> portalsToRender = recursion == 0 ? topLevelPortalCandidates : getFramePortalEntities(level);
         for(PortalEntity portal : portalsToRender) {
             PROFILE.push("renderPortal");
             renderPortal(portal, camera, clippingHelper, projectionMatrix, partialTicks, fabulousGraphics);
