@@ -85,7 +85,12 @@ public abstract class GameRendererMixin {
         if(player == null)
             return rayResult;
 
+        if(PortalEntity.getCachedOpenPortals(player.level).isEmpty())
+            return rayResult;
+
         List<PortalEntity> portalChain = ModUtil.getPortalsAlongRay(player.level, new Vec3(from), new Vec3(to), portal -> true);
+        if(portalChain.isEmpty())
+            return rayResult;
         Mat4 portalMatrix = ModUtil.getMatrixFromPortalChain(portalChain);
         Pair<Vector3d, Vector3d> ray = ModUtil.teleportRay(portalChain, from, to);
         aabb = AABBUtil.transform(aabb, portalMatrix);
