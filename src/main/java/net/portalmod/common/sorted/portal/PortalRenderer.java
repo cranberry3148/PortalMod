@@ -1604,14 +1604,22 @@ public class PortalRenderer {
     }
 
     public void renderHighlights(ActiveRenderInfo camera, Matrix4f projectionMatrix) {
+        ClientWorld level = Minecraft.getInstance().level;
+        ClientPlayerEntity player = Minecraft.getInstance().player;
+        if(level == null || player == null)
+            return;
+
+        ItemStack item = player.getMainHandItem();
+        Optional<UUID> gunUUID = PortalGun.getUUID(item);
+        if(!(item.getItem() instanceof PortalGun) || !gunUUID.isPresent())
+            return;
+
         if(PortalMod.DEBUG)
             GL43.glPushDebugGroup(GL43.GL_DEBUG_SOURCE_APPLICATION, 0, "Highlights");
 
-        ClientWorld level = Minecraft.getInstance().level;
-        ClientPlayerEntity player = Minecraft.getInstance().player;
-
-        if(level == null || player == null)
-            return;
+        Vector3d cameraPos = currentCamera != null
+                ? currentCamera.getPosition()
+                : Minecraft.getInstance().gameRenderer.getMainCamera().getPosition();
 
         GL11.glEnable(GL_STENCIL_TEST);
         RenderSystem.stencilMask(0);
@@ -1626,13 +1634,7 @@ public class PortalRenderer {
         RenderSystem.disableCull();
 
         for(PortalEntity portal : getFramePortalEntities(level)) {
-            Vector3d cameraPos = Minecraft.getInstance().gameRenderer.getMainCamera().getPosition();
-            if(currentCamera != null)
-                cameraPos = currentCamera.getPosition();
-
-            ItemStack item = player.getMainHandItem();
-            Optional<UUID> gunUUID = PortalGun.getUUID(item);
-            if (!(item.getItem() instanceof PortalGun) || !gunUUID.isPresent() || !gunUUID.get().equals(portal.getGunUUID()))
+            if(!gunUUID.get().equals(portal.getGunUUID()))
                 continue;
 
             Matrix4f model = getModelMatrix(portal, camera, portal.getWallAttachmentDistance(camera) * 3);
