@@ -905,11 +905,6 @@ public class PortalRenderer {
             currentlyRenderingPortals = true;
             fabulousGraphics = shouldUseShaderTransparency(mc);
 
-            if(fabulousGraphics) {
-                tempFBO.bindWrite(true);
-                GL11.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-            }
-
             mainFBO.bindWrite(true);
             GL11.glEnable(GL_STENCIL_TEST);
             RenderSystem.stencilMask(0x80);
@@ -926,14 +921,6 @@ public class PortalRenderer {
 
         if(recursion == 0) {
             currentlyRenderingPortals = false;
-        }
-
-        if(fabulousGraphics) {
-            PROFILE.push("fabulousBlit@r" + recursion);
-            blitFBOtoFBO(mainFBO, tempFBO);
-            tempFBO.copyDepthFrom(mainFBO);
-            mainFBO.bindWrite(true);
-            PROFILE.pop();
         }
 
         if(recursion == 0 && PortalModConfigManager.HIGHLIGHTS.get()) {
@@ -1501,6 +1488,14 @@ public class PortalRenderer {
             canNestRender = otherPortalOptional.isPresent() && !isDeepest();
 
             if(canNestRender) {
+                if(fabulousGraphics) {
+                    PROFILE.push("fabulousSnapshot");
+                    blitFBOtoFBO(mainFBO, tempFBO);
+                    tempFBO.copyDepthFrom(mainFBO);
+                    mainFBO.bindWrite(true);
+                    PROFILE.pop();
+                }
+
                 PortalEntity otherPortal = otherPortalOptional.get();
                 MatrixStack matrixStack = new MatrixStack();
                 ActiveRenderInfo portalCamera = setupCamera(camera, portal, partialTicks);
