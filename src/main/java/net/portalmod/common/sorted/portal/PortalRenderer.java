@@ -927,61 +927,74 @@ public class PortalRenderer {
             RenderSystem.clear(GL_STENCIL_BUFFER_BIT, false);
         }
 
-        renderedPortals = 0;
-        for(PortalEntity portal : portalsToRender) {
-            PROFILE.push("renderPortal");
-            renderPortal(portal, camera, clippingHelper, projectionMatrix, partialTicks, fabulousGraphics);
+        // Hard guarantee: whatever happens during the per-portal loop (exceptions,
+        // early returns inside renderPortal, etc.), we MUST clear
+        // currentlyRenderingPortals and restore GL state before returning control to
+        // the outer renderLevel. A leaked `currentlyRenderingPortals = true` causes
+        // the outer translucent pass to be re-routed through PORTAL_TRANSLUCENT,
+        // which produces exactly the frame-to-frame flicker of translucent blocks
+        // (fizzler fields, antline indicators, etc.) that shows up when a portal is
+        // visible.
+        try {
+            renderedPortals = 0;
+            for(PortalEntity portal : portalsToRender) {
+                PROFILE.push("renderPortal");
+                try {
+                    renderPortal(portal, camera, clippingHelper, projectionMatrix, partialTicks, fabulousGraphics);
+                } finally {
+                    PROFILE.pop();
+                }
+                renderedPortals++;
+            }
+        } finally {
+            if(recursion == 0) {
+                currentlyRenderingPortals = false;
+            }
+
+            if(fabulousGraphics) {
+                PROFILE.push("fabulousBlit@r" + recursion);
+                blitFBOtoFBO(mainFBO, tempFBO);
+                mainFBO.bindWrite(true);
+                PROFILE.pop();
+            }
+
+            if(recursion == 0 && PortalModConfigManager.HIGHLIGHTS.get()) {
+                PROFILE.push("highlights");
+                renderHighlights(camera, projectionMatrix);
+                PROFILE.pop();
+            }
+
+            if(recursion == 0 && !fabulousGraphics) {
+                mainFBO.bindWrite(true);
+                GL11.glEnable(GL_STENCIL_TEST);
+                RenderSystem.stencilMask(0xFF);
+                RenderSystem.clear(GL_STENCIL_BUFFER_BIT, false);
+            }
+
+            GL11.glEnable(GL_ALPHA_TEST);
+            if(recursion == 0) {
+                mainFBO.bindWrite(true);
+                glDisable(GL_CLIP_PLANE0);
+                GL11.glDisable(GL_STENCIL_TEST);
+                RenderSystem.stencilMask(~0);
+                RenderSystem.stencilFunc(GL_ALWAYS, 0, 0xFF);
+                RenderSystem.stencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+                RenderSystem.colorMask(true, true, true, true);
+                RenderSystem.enableDepthTest();
+                RenderSystem.depthFunc(GL_LESS);
+                RenderSystem.depthMask(true);
+                RenderSystem.disableBlend();
+                RenderSystem.defaultBlendFunc();
+                RenderSystem.enableCull();
+                RenderSystem.activeTexture(GL_TEXTURE0);
+                RenderSystem.bindTexture(0);
+            }
+
             PROFILE.pop();
-            renderedPortals++;
-        }
-
-        if(recursion == 0) {
-            currentlyRenderingPortals = false;
-        }
-
-        if(fabulousGraphics) {
-            PROFILE.push("fabulousBlit@r" + recursion);
-            blitFBOtoFBO(mainFBO, tempFBO);
-            mainFBO.bindWrite(true);
-            PROFILE.pop();
-        }
-
-        if(recursion == 0 && PortalModConfigManager.HIGHLIGHTS.get()) {
-            PROFILE.push("highlights");
-            renderHighlights(camera, projectionMatrix);
-            PROFILE.pop();
-        }
-
-        if(recursion == 0 && !fabulousGraphics) {
-            mainFBO.bindWrite(true);
-            GL11.glEnable(GL_STENCIL_TEST);
-            RenderSystem.stencilMask(0xFF);
-            RenderSystem.clear(GL_STENCIL_BUFFER_BIT, false);
-        }
-
-        GL11.glEnable(GL_ALPHA_TEST);
-        if(recursion == 0) {
-            mainFBO.bindWrite(true);
-            glDisable(GL_CLIP_PLANE0);
-            GL11.glDisable(GL_STENCIL_TEST);
-            RenderSystem.stencilMask(~0);
-            RenderSystem.stencilFunc(GL_ALWAYS, 0, 0xFF);
-            RenderSystem.stencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
-            RenderSystem.colorMask(true, true, true, true);
-            RenderSystem.enableDepthTest();
-            RenderSystem.depthFunc(GL_LESS);
-            RenderSystem.depthMask(true);
-            RenderSystem.disableBlend();
-            RenderSystem.defaultBlendFunc();
-            RenderSystem.enableCull();
-            RenderSystem.activeTexture(GL_TEXTURE0);
-            RenderSystem.bindTexture(0);
-        }
-
-        PROFILE.pop();
-        if(isOuter) {
-            PROFILE.pop();
-            PROFILE.snapshotInto(net.portalmod.core.event.ClientEvents.debugStrings);
+            if(isOuter) {
+                PROFILE.pop();
+                PROFILE.snapshotInto(net.portalmod.core.event.ClientEvents.debugStrings);
+            }
         }
     }
 
