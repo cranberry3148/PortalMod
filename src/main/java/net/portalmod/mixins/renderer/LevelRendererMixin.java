@@ -252,6 +252,9 @@ public class LevelRendererMixin {
             )
     )
     private void pmRenderDuplicateEntities(MatrixStack matrixStack, float partialTicks, long l, boolean b, ActiveRenderInfo camera, GameRenderer gr, LightTexture lt, Matrix4f projectionMatrix, CallbackInfo info) {
+        if(!DuplicateEntityRenderer.shouldRenderDuplicatePass(camera, Minecraft.getInstance().level))
+            return;
+
         Vector3d vector3d = camera.getPosition();
         double camX = vector3d.x();
         double camY = vector3d.y();
