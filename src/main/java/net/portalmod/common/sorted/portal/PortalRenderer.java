@@ -1412,8 +1412,6 @@ public class PortalRenderer {
                 ActiveRenderInfo portalCamera = setupCamera(camera, portal, partialTicks);
                 setupMatrixStack(matrixStack, portalCamera);
                 setupSkyAndFog(portalCamera, partialTicks);
-                FogRenderer.setupColor(portalCamera, partialTicks, mc.level, mc.options.renderDistance,
-                        mc.gameRenderer.getDarkenWorldAmount(partialTicks));
 
                 portalStack.push(otherPortal);
 
