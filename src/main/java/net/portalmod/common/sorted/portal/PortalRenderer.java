@@ -385,16 +385,36 @@ public class PortalRenderer {
         }
     }
 
-    private boolean passesCheapPortalViewTests(PortalEntity portal, Vec3 cameraPos, ClippingHelper clippingHelper) {
-        Vec3 portalPos = new Vec3(portal.position());
-        Vec3 portalToCamera = cameraPos.sub(portalPos);
-        double distance = portalToCamera.magnitude();
-        Vec3 portalNormal = new Vec3(portal.getDirection());
+    private static double distanceToCameraSqr(PortalEntity portal, Vec3 cameraPos) {
+        Vector3d portalPos = portal.position();
+        double dx = cameraPos.x - portalPos.x;
+        double dy = cameraPos.y - portalPos.y;
+        double dz = cameraPos.z - portalPos.z;
+        return dx * dx + dy * dy + dz * dz;
+    }
 
-        if(distance > 1.0D && portalToCamera.clone().normalize().dot(portalNormal) < 0.0D)
+    private static boolean isPortalFacingAwayFromCamera(PortalEntity portal, Vec3 cameraPos) {
+        if(portal.getDirection().getAxis().isVertical())
             return false;
 
-        return distance <= 1.0D || clippingHelper.isVisible(portal.getBoundingBox());
+        Vector3d portalPos = portal.position();
+        double dx = cameraPos.x - portalPos.x;
+        double dy = cameraPos.y - portalPos.y;
+        double dz = cameraPos.z - portalPos.z;
+        double distanceSqr = dx * dx + dy * dy + dz * dz;
+        if(distanceSqr <= 1.0D)
+            return false;
+
+        Vector3d portalNormal = Vector3d.atLowerCornerOf(portal.getDirection().getNormal());
+        double invDistance = 1.0D / Math.sqrt(distanceSqr);
+        return (dx * invDistance) * portalNormal.x + (dy * invDistance) * portalNormal.y + (dz * invDistance) * portalNormal.z < 0.0D;
+    }
+
+    private boolean passesCheapPortalViewTests(PortalEntity portal, Vec3 cameraPos, ClippingHelper clippingHelper) {
+        double distanceSqr = distanceToCameraSqr(portal, cameraPos);
+        if(isPortalFacingAwayFromCamera(portal, cameraPos))
+            return false;
+        return distanceSqr <= 1.0D || clippingHelper.isVisible(portal.getBoundingBox());
     }
 
     private void buildPortalFramePlan(ActiveRenderInfo camera, ClippingHelper clippingHelper, Matrix4f projectionMatrix) {
