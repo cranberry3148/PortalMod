@@ -1663,7 +1663,18 @@ public class PortalRenderer {
 
                 PROFILE.push("restoreRenderChunks");
                 try {
-                    mc.levelRenderer.needsUpdate = true;
+                    // NOTE: do NOT force `mc.levelRenderer.needsUpdate = true` here.
+                    // Vanilla's setupRender already sets needsUpdate when the camera
+                    // moves, when there are dirty chunks, or when there are pending
+                    // compile tasks, so forcing it on every portal pass just causes
+                    // the outer chunk BFS to be rebuilt needlessly each frame.
+                    // Rebuilding the BFS list frame-to-frame when the outer camera
+                    // is stationary can drop/re-add near-chunks in the visibility
+                    // set (especially when nested setupRenders have thrashed the
+                    // shared `frameId` + `lastFrame` bookkeeping on ChunkRenders),
+                    // which manifests as translucent blocks like fizzler fields and
+                    // antline indicators flickering in and out of existence while a
+                    // portal is on-screen.
                     mc.levelRenderer.renderChunks.clear();
                     mc.levelRenderer.renderChunks.addAll(renderChunks);
 
