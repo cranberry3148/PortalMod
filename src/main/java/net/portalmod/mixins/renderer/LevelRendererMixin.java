@@ -85,6 +85,14 @@ public class LevelRendererMixin {
 
     // BEWARE: PORTAL RENDERING
     @Inject(
+            method = "renderLevel",
+            at = @At("HEAD")
+    )
+    private void pmPreparePortalFramebuffer(MatrixStack matrixStack, float partialTicks, long l, boolean b, ActiveRenderInfo camera, GameRenderer gr, LightTexture lt, Matrix4f matrix, CallbackInfo info) {
+        PortalRenderer.getInstance().prepareMainFramebufferForPortalRendering(Minecraft.getInstance().level);
+    }
+
+    @Inject(
                         method = "renderLevel",
             at = @At(
                     value = "INVOKE",

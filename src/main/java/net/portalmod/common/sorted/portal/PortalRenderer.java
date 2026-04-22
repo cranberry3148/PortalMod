@@ -151,6 +151,7 @@ public class PortalRenderer {
     private float lastOuterCameraYRot;
     private float fastCameraMotionFactor;
     private boolean mainFramebufferStencilFailed;
+    private boolean tempFramebufferStencilFailed;
 
     // --- profiler ---
     public static final Profile PROFILE = new Profile();
@@ -816,6 +817,29 @@ public class PortalRenderer {
         }
     }
 
+    private boolean ensureTempFramebufferStencil() {
+        if(tempFramebufferStencilFailed)
+            return false;
+        if(tempFBO.isStencilEnabled())
+            return true;
+
+        try {
+            tempFBO.enableStencil();
+            return tempFBO.isStencilEnabled();
+        } catch(RuntimeException exception) {
+            tempFramebufferStencilFailed = true;
+            PortalMod.LOGGER.error("Failed to enable stencil on the portal temp framebuffer. Falling back to non-fabulous portal rendering.", exception);
+            return false;
+        }
+    }
+
+    public boolean prepareMainFramebufferForPortalRendering(@Nullable ClientWorld level) {
+        if(level == null || mainFramebufferStencilFailed)
+            return !mainFramebufferStencilFailed;
+        if(PortalEntity.getCachedOpenPortals(level).isEmpty())
+            return true;
+        return ensureMainFramebufferStencil(Minecraft.getInstance().getMainRenderTarget());
+    }
     public void renderPortals(ClientWorld level, ActiveRenderInfo camera, ClippingHelper clippingHelper, Matrix4f projectionMatrix, float partialTicks) {
         Minecraft mc = Minecraft.getInstance();
         Framebuffer mainFBO = mc.getMainRenderTarget();
@@ -877,12 +901,16 @@ public class PortalRenderer {
                 if(tempFBO.width != w || tempFBO.height != h)
                     tempFBO.resize(w, h, Minecraft.ON_OSX);
 
-                tempFBO.enableStencil();
-                tempFBO.bindWrite(false);
+                if(!ensureTempFramebufferStencil())
+                    fabulousGraphics = false;
+            }
+
+            if(fabulousGraphics) {
+                tempFBO.bindWrite(true);
                 GL11.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             }
 
-            mainFBO.bindWrite(false);
+            mainFBO.bindWrite(true);
             GL11.glEnable(GL_STENCIL_TEST);
             RenderSystem.stencilMask(0x80);
             RenderSystem.clear(GL_STENCIL_BUFFER_BIT, false);
@@ -904,7 +932,7 @@ public class PortalRenderer {
             PROFILE.push("fabulousBlit@r" + recursion);
             blitFBOtoFBO(mainFBO, tempFBO);
             tempFBO.copyDepthFrom(mainFBO);
-            mainFBO.bindWrite(false);
+            mainFBO.bindWrite(true);
             PROFILE.pop();
         }
 
@@ -915,13 +943,18 @@ public class PortalRenderer {
         }
 
         if(recursion == 0 && !fabulousGraphics) {
-            mainFBO.bindWrite(false);
+            mainFBO.bindWrite(true);
             GL11.glEnable(GL_STENCIL_TEST);
             RenderSystem.stencilMask(0xFF);
             RenderSystem.clear(GL_STENCIL_BUFFER_BIT, false);
         }
 
         GL11.glEnable(GL_ALPHA_TEST);
+        if(recursion == 0) {
+            GL11.glDisable(GL_STENCIL_TEST);
+            RenderSystem.stencilMask(~0);
+            RenderSystem.stencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+        }
 
         PROFILE.pop();
         if(isOuter) {
@@ -1373,7 +1406,7 @@ public class PortalRenderer {
 
         RenderSystem.activeTexture(GL_TEXTURE0);
         src.bindRead();
-        dest.bindWrite(false);
+        dest.bindWrite(true);
         blitQuad.render();
 
         RenderSystem.enableDepthTest();
@@ -1599,7 +1632,7 @@ public class PortalRenderer {
                     PROFILE.push("fabulousBlit(nested)");
                     blitFBOtoFBO(tempFBO, mainFBO);
                     mainFBO.copyDepthFrom(tempFBO);
-                    mainFBO.bindWrite(false);
+                    mainFBO.bindWrite(true);
                     PROFILE.pop();
                 }
             }
