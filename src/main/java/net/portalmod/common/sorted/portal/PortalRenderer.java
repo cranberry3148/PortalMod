@@ -564,26 +564,33 @@ public class PortalRenderer {
         int rank = plan == null ? Integer.MAX_VALUE : plan.rank;
         float coverage = plan == null ? portalCoverage : plan.coverage;
         boolean fastMotion = fastCameraMotionFactor >= FAST_CAMERA_HARD_CLAMP_START;
-        boolean topPortal = rank < FULL_DETAIL_PORTAL_BUDGET;
-        boolean mediumPortal = rank < MEDIUM_DETAIL_PORTAL_BUDGET;
+        int fullDetailBudget = fastMotion ? 1 : FULL_DETAIL_PORTAL_BUDGET;
+        int mediumDetailBudget = fastMotion ? 2 : MEDIUM_DETAIL_PORTAL_BUDGET;
+        boolean topPortal = rank < fullDetailBudget;
+        boolean mediumPortal = rank < mediumDetailBudget;
         boolean largePortal = coverage >= 0.18F;
         boolean mediumCoverage = coverage >= 0.08F;
+        boolean skyCoverage = coverage >= 0.14F;
 
         boolean renderEntities = (topPortal && !fastMotion) || largePortal;
         boolean renderBlockEntities = topPortal && largePortal && fastCameraMotionFactor < 0.45F;
         boolean renderTranslucent = topPortal || (mediumPortal && mediumCoverage && fastCameraMotionFactor < 0.75F);
         boolean renderParticles = topPortal && coverage >= 0.2F && fastCameraMotionFactor < 0.35F;
-        boolean renderClouds = topPortal && coverage >= 0.22F && fastCameraMotionFactor < 0.25F;
+        boolean renderSky = topPortal && skyCoverage && fastCameraMotionFactor < 0.55F;
+        boolean renderClouds = renderSky && coverage >= 0.22F && fastCameraMotionFactor < 0.25F;
         boolean renderWeather = topPortal && coverage >= 0.22F && fastCameraMotionFactor < 0.35F;
-        boolean compileChunks = topPortal && fastCameraMotionFactor < 0.25F;
+        boolean renderWorldBounds = topPortal && coverage >= 0.3F && fastCameraMotionFactor < 0.25F;
+        boolean compileChunks = topPortal && coverage >= 0.16F && fastCameraMotionFactor < 0.2F;
 
         if(recursion >= 2) {
             renderEntities &= coverage >= 0.12F && fastCameraMotionFactor < 0.7F;
             renderBlockEntities = false;
             renderTranslucent &= coverage >= 0.12F;
             renderParticles = false;
+            renderSky = false;
             renderClouds = false;
             renderWeather = false;
+            renderWorldBounds = false;
             compileChunks = false;
         }
 
@@ -592,8 +599,10 @@ public class PortalRenderer {
                 renderBlockEntities,
                 renderTranslucent,
                 renderParticles,
+                renderSky,
                 renderClouds,
                 renderWeather,
+                renderWorldBounds,
                 compileChunks
         ).mergeWithParent(getCurrentNestedRenderSettings());
     }
