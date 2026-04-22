@@ -113,6 +113,8 @@ public class LevelRendererMixin {
             )
     )
     private void pmGateNestedSky(WorldRenderer instance, MatrixStack matrixStack, float partialTicks) {
+        if(pmShouldUseNestedRenderPolicy() && !PortalRenderer.getInstance().shouldRenderNestedSky())
+            return;
         instance.renderSky(matrixStack, partialTicks);
     }
 
@@ -345,6 +347,8 @@ public class LevelRendererMixin {
             )
     )
     private void pmGateNestedWorldBounds(WorldRenderer instance, ActiveRenderInfo camera) {
+        if(pmShouldUseNestedRenderPolicy() && !PortalRenderer.getInstance().shouldRenderNestedWorldBounds())
+            return;
         instance.renderWorldBounds(camera);
     }
 
