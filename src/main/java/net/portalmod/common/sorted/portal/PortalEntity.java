@@ -1,6 +1,5 @@
 package net.portalmod.common.sorted.portal;
 
-import com.google.common.collect.Lists;
 import com.mojang.blaze3d.matrix.MatrixStack;
 import net.minecraft.client.renderer.ActiveRenderInfo;
 import net.minecraft.entity.*;
@@ -56,6 +55,13 @@ import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 public class PortalEntity extends Entity implements IEntityAdditionalSpawnData {
+    private static final Map<World, OpenPortalCache> OPEN_PORTAL_CACHE = new WeakHashMap<>();
+
+    private static final class OpenPortalCache {
+        long gameTime = Long.MIN_VALUE;
+        final List<PortalEntity> portals = new ArrayList<>();
+    }
+
     private final float WIDTH = 1;
     private final float HEIGHT = 2;
     private final float DEPTH = 1/16f;
@@ -830,22 +836,98 @@ public class PortalEntity extends Entity implements IEntityAdditionalSpawnData {
     }
 
     public static List<PortalEntity> getOpenPortals(World level, AxisAlignedBB bb, Predicate<PortalEntity> predicate) {
+        List<PortalEntity> openPortals = getOpenPortalsIndexed(level, bb);
         List<PortalEntity> portals = new ArrayList<>();
+        for(PortalEntity portal : openPortals) {
+            if(portal.getBoundingBox().intersects(bb) && predicate.test(portal))
+                portals.add(portal);
+        }
+        return portals;
+    }
+
+    private static List<PortalEntity> getOpenPortalsIndexed(World level, AxisAlignedBB bb) {
+        Map<UUID, PortalPair> portalPairs = PortalManager.getInstance().getPortalMap();
+        Map<net.minecraft.util.RegistryKey<World>, HashMap<ChunkPos, List<PortalEntity>>> portalsPerChunk = PortalManager.getInstance().getPortalsPerChunk();
+        if(level.isClientSide) {
+            portalPairs = ClientPortalManager.getInstance().getPortalMap();
+            portalsPerChunk = ClientPortalManager.getInstance().getPortalsPerChunk();
+        }
+
+        HashMap<ChunkPos, List<PortalEntity>> chunkMap = portalsPerChunk.get(level.dimension());
+        if(chunkMap == null || chunkMap.isEmpty())
+            return getCachedOpenPortals(level);
+
+        int minChunkX = MathHelper.floor(bb.minX - 1.0D) >> 4;
+        int maxChunkX = MathHelper.floor(bb.maxX + 1.0D) >> 4;
+        int minChunkZ = MathHelper.floor(bb.minZ - 1.0D) >> 4;
+        int maxChunkZ = MathHelper.floor(bb.maxZ + 1.0D) >> 4;
+
+        LinkedHashSet<PortalEntity> indexedPortals = new LinkedHashSet<>();
+        for(int chunkX = minChunkX; chunkX <= maxChunkX; chunkX++) {
+            for(int chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ++) {
+                List<PortalEntity> portals = chunkMap.get(new ChunkPos(chunkX, chunkZ));
+                if(portals != null)
+                    indexedPortals.addAll(portals);
+            }
+        }
+
+        if(indexedPortals.isEmpty())
+            return getCachedOpenPortals(level);
+
+        indexedPortals.removeIf(portal -> portal == null || portal.level != level || !portal.isOpen());
+        return new ArrayList<>(indexedPortals);
+    }
+
+    public static List<PortalEntity> getCachedOpenPortals(World level) {
+        OpenPortalCache cache = OPEN_PORTAL_CACHE.computeIfAbsent(level, ignored -> new OpenPortalCache());
+        long gameTime = level.getGameTime();
+        if(cache.gameTime == gameTime)
+            return cache.portals;
+
+        cache.gameTime = gameTime;
+        cache.portals.clear();
 
         Map<UUID, PortalPair> portalPairs = PortalManager.getInstance().getPortalMap();
         if(level.isClientSide)
             portalPairs = ClientPortalManager.getInstance().getPortalMap();
 
-        List<PortalEntity> portalList = portalPairs.values().stream()
-                .map(pair -> Lists.newArrayList(pair.get(PortalEnd.PRIMARY), pair.get(PortalEnd.SECONDARY)))
-                .flatMap(List::stream)
-                .collect(Collectors.toList());
+        for(PortalPair pair : portalPairs.values()) {
+            PortalEntity primary = pair.get(PortalEnd.PRIMARY);
+            if(primary != null && primary.level == level && primary.isOpen())
+                cache.portals.add(primary);
 
-        for(PortalEntity portal : portalList)
-            if(portal != null)
-                if(portal.getBoundingBox().intersects(bb) && portal.isOpen() && predicate.test(portal))
-                    portals.add(portal);
-        return portals;
+            PortalEntity secondary = pair.get(PortalEnd.SECONDARY);
+            if(secondary != null && secondary.level == level && secondary.isOpen())
+                cache.portals.add(secondary);
+        }
+
+        return cache.portals;
+    }
+
+    static void addPortalToChunkIndex(Map<net.minecraft.util.RegistryKey<World>, HashMap<ChunkPos, List<PortalEntity>>> index, PortalEntity portal) {
+        ChunkPos chunkPos = new ChunkPos(MathHelper.floor(portal.getX()) >> 4, MathHelper.floor(portal.getZ()) >> 4);
+        HashMap<ChunkPos, List<PortalEntity>> chunks = index.getOrDefault(portal.level.dimension(), new HashMap<>());
+        List<PortalEntity> portals = chunks.getOrDefault(chunkPos, new ArrayList<>());
+        portals.add(portal);
+        chunks.put(chunkPos, portals);
+        index.put(portal.level.dimension(), chunks);
+    }
+
+    static void removePortalFromChunkIndex(Map<net.minecraft.util.RegistryKey<World>, HashMap<ChunkPos, List<PortalEntity>>> index, PortalEntity portal) {
+        HashMap<ChunkPos, List<PortalEntity>> chunks = index.get(portal.level.dimension());
+        if(chunks == null)
+            return;
+
+        ChunkPos chunkPos = new ChunkPos(MathHelper.floor(portal.getX()) >> 4, MathHelper.floor(portal.getZ()) >> 4);
+        List<PortalEntity> portals = chunks.get(chunkPos);
+        if(portals == null)
+            return;
+
+        portals.remove(portal);
+        if(portals.isEmpty())
+            chunks.remove(chunkPos);
+        if(chunks.isEmpty())
+            index.remove(portal.level.dimension());
     }
 
     public Optional<PortalEntity> getOtherPortal() {

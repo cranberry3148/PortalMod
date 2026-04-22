@@ -94,12 +94,7 @@ public class PortalManager extends WorldSavedData {
                 blue.load(primary);
                 portalPair.set(PortalEnd.PRIMARY, blue);
 
-                ChunkPos chunkPos = new ChunkPos(MathHelper.floor(blue.getX()) >> 4, MathHelper.floor(blue.getZ()) >> 4);
-                HashMap<ChunkPos, List<PortalEntity>> chunks = portalsPerChunk.getOrDefault(rk, new HashMap<>());
-                List<PortalEntity> portals = chunks.getOrDefault(chunkPos, new ArrayList<>());
-                portals.add(blue);
-                chunks.put(chunkPos, portals);
-                portalsPerChunk.put(rk, chunks);
+                PortalEntity.addPortalToChunkIndex(portalsPerChunk, blue);
             }
             if(pair.contains("secondary")) {
                 CompoundNBT secondary = pair.getCompound("secondary");
@@ -111,12 +106,7 @@ public class PortalManager extends WorldSavedData {
                 orange.load(secondary);
                 portalPair.set(PortalEnd.SECONDARY, orange);
 
-                ChunkPos chunkPos = new ChunkPos(MathHelper.floor(orange.getX()) >> 4, MathHelper.floor(orange.getZ()) >> 4);
-                HashMap<ChunkPos, List<PortalEntity>> chunks = portalsPerChunk.getOrDefault(rk, new HashMap<>());
-                List<PortalEntity> portals = chunks.getOrDefault(chunkPos, new ArrayList<>());
-                portals.add(orange);
-                chunks.put(chunkPos, portals);
-                portalsPerChunk.put(rk, chunks);
+                PortalEntity.addPortalToChunkIndex(portalsPerChunk, orange);
             }
             portalMap.put(UUID.fromString(key), portalPair);
         }
@@ -178,12 +168,7 @@ public class PortalManager extends WorldSavedData {
         portal.inChunk = true;
         portalMap.put(gunUUID, pair);
 
-        ChunkPos chunkPos = new ChunkPos(MathHelper.floor(portal.getX()) >> 4, MathHelper.floor(portal.getZ()) >> 4);
-        HashMap<ChunkPos, List<PortalEntity>> chunks = portalsPerChunk.getOrDefault(portal.level.dimension(), new HashMap<>());
-        List<PortalEntity> portals = chunks.getOrDefault(chunkPos, new ArrayList<>());
-        portals.add(portal);
-        chunks.put(chunkPos, portals);
-        portalsPerChunk.put(portal.level.dimension(), chunks);
+        PortalEntity.addPortalToChunkIndex(portalsPerChunk, portal);
 
         PacketInit.INSTANCE.send(PacketDistributor.ALL.noArg(), new SPortalPairPacket(gunUUID, new PartialPortalPair(pair)));
 
@@ -195,16 +180,7 @@ public class PortalManager extends WorldSavedData {
             pair.remove(portal);
             portal.inChunk = false;
 
-            RegistryKey<World> dimension = portal.level.dimension();
-            ChunkPos chunkPos = new ChunkPos(MathHelper.floor(portal.getX()) >> 4, MathHelper.floor(portal.getZ()) >> 4);
-            if(portalsPerChunk.containsKey(dimension)) {
-                if(portalsPerChunk.get(dimension).containsKey(chunkPos)) {
-                    List<PortalEntity> portals = portalsPerChunk.get(dimension).get(chunkPos);
-                    portals.remove(portal);
-                    if (portals.isEmpty())
-                        portalsPerChunk.get(dimension).remove(chunkPos);
-                }
-            }
+            PortalEntity.removePortalFromChunkIndex(portalsPerChunk, portal);
 
             getStorageAndSetDirty();
             return !pair.isEmpty() ? pair : null;
