@@ -41,6 +41,7 @@
         "KeyboardListenerMixin",
         "MinecraftMixin",
         "PlayerControllerMixin",
+        "client.GraphicsFancinessMixin",
         "accessors.ActiveRenderInfoAccessor",
         "accessors.ChunkRenderDispatcherAccessor",
         "accessors.CompiledChunkAccessor",
