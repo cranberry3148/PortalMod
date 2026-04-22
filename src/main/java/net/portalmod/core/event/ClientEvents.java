@@ -83,7 +83,6 @@ import java.util.Optional;
 
 @EventBusSubscriber(modid = PortalMod.MODID, bus = Bus.FORGE, value = Dist.CLIENT)
 public class ClientEvents {
-
     @SubscribeEvent
     public static void onClientLogin(final ClientPlayerNetworkEvent.LoggedInEvent event) {
         ClientSkinManager.getInstance().onClientLogin();
