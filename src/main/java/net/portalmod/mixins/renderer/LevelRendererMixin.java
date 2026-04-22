@@ -18,7 +18,6 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.vector.Matrix4f;
 import net.minecraft.util.math.vector.Vector3d;
 import net.minecraft.world.IBlockReader;
-import net.portalmod.client.render.PortalCamera;
 import net.portalmod.common.sorted.fizzler.FizzlerFieldBlock;
 import net.portalmod.common.sorted.portal.*;
 import net.portalmod.core.config.PortalModConfigManager;
@@ -64,15 +63,10 @@ public class LevelRendererMixin {
             )
     )
     private void pmSetupColor(ActiveRenderInfo camera, float partialTicks, ClientWorld level, int renderDistance, float darken) {
-        if(PortalRenderer.getInstance().currentlyRenderingPortals) {
-            PortalEntity currentPortal = PortalRenderer.getInstance().portalChain.peekLast();
-            if(currentPortal != null && currentPortal.getOtherPortal().isPresent()) {
-                camera = new PortalCamera(camera, partialTicks);
-                camera.setPosition(currentPortal.getOtherPortal().get().position());
-            }
-        }
-
-        FogRenderer.setupColor(camera, partialTicks, level, renderDistance, darken);
+        ActiveRenderInfo activeCamera = PortalRenderer.getInstance().currentlyRenderingPortals
+                ? PortalRenderer.getInstance().getCurrentCamera()
+                : camera;
+        FogRenderer.setupColor(activeCamera, partialTicks, level, renderDistance, darken);
     }
 
     @Redirect(
@@ -83,15 +77,10 @@ public class LevelRendererMixin {
             )
     )
     private void pmSetupFog(ActiveRenderInfo camera, FogRenderer.FogType type, float renderDistance, boolean b, float partialTicks) {
-        if(PortalRenderer.getInstance().currentlyRenderingPortals) {
-            PortalEntity currentPortal = PortalRenderer.getInstance().portalChain.peekLast();
-            if(currentPortal != null && currentPortal.getOtherPortal().isPresent()) {
-                camera = new PortalCamera(camera, partialTicks);
-                camera.setPosition(currentPortal.getOtherPortal().get().position());
-            }
-        }
-
-        FogRenderer.setupFog(camera, type, renderDistance, b, partialTicks);
+        ActiveRenderInfo activeCamera = PortalRenderer.getInstance().currentlyRenderingPortals
+                ? PortalRenderer.getInstance().getCurrentCamera()
+                : camera;
+        FogRenderer.setupFog(activeCamera, type, renderDistance, b, partialTicks);
     }
 
     // BEWARE: PORTAL RENDERING
