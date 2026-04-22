@@ -476,18 +476,12 @@ public class PortalRenderer {
     }
 
     private boolean isTopLevelPortalCandidate(PortalEntity portal, Vec3 cameraPos, ClippingHelper clippingHelper, @Nullable float[] rect) {
-        Vec3 portalPos = new Vec3(portal.position());
-        Vec3 portalToCamera = cameraPos.sub(portalPos);
-        double distance = portalToCamera.magnitude();
-        Vec3 portalNormal = new Vec3(portal.getDirection());
+        double distanceSqr = distanceToCameraSqr(portal, cameraPos);
 
-        if(distance > 1.0D && portalToCamera.clone().normalize().dot(portalNormal) < 0.0D)
+        if(distanceSqr > 1.0D && !clippingHelper.isVisible(portal.getBoundingBox()))
             return false;
 
-        if(distance > 1.0D && !clippingHelper.isVisible(portal.getBoundingBox()))
-            return false;
-
-        if(distance > 1.5D && rect != null && !rectsIntersect(rect, currentParentNdcRect))
+        if(distanceSqr > 2.25D && rect != null && !rectsIntersect(rect, currentParentNdcRect))
             return false;
 
         return true;
@@ -882,17 +876,16 @@ public class PortalRenderer {
 
     private boolean discardPortal(PortalEntity portal, ActiveRenderInfo camera, ClippingHelper clippingHelper, Matrix4f projectionMatrix) {
         Vec3 cameraPos = new Vec3(camera.getPosition());
-        Vec3 portalPos = new Vec3(portal.position());
-        Vec3 portalToCamera = cameraPos.sub(portalPos);
-        Vec3 portalNormal = new Vec3(portal.getDirection());
+        double distanceSqr = distanceToCameraSqr(portal, cameraPos);
 
         // discard portals facing away from camera
-        if(portalToCamera.magnitude() > 1 && portalToCamera.clone().normalize().dot(portalNormal) < 0)
+        if(isPortalFacingAwayFromCamera(portal, cameraPos))
             return true;
 
         // discard portals behind parent portal
         if(!portalStack.isEmpty()) {
             PortalEntity parentPortal = portalStack.peek();
+            Vec3 portalPos = new Vec3(portal.position());
             Vec3 parentPortalPos = new Vec3(parentPortal.position());
             Vec3 parentPortalNormal = new Vec3(parentPortal.getDirection());
             Vec3 parentPortalPosWithMargin = parentPortalPos.clone().sub(parentPortalNormal.clone().mul(2));
@@ -906,7 +899,7 @@ public class PortalRenderer {
         }
 
         // discard portals outside view frustum
-        if(portalToCamera.magnitude() > 1 && !clippingHelper.isVisible(portal.getBoundingBox()))
+        if(distanceSqr > 1.0D && !clippingHelper.isVisible(portal.getBoundingBox()))
             return true;
 
         // Screen-space portal culling: if the projected portal quad does not intersect
@@ -915,7 +908,7 @@ public class PortalRenderer {
         // and in nested passes it is the already-clipped parent portal silhouette.
         // Skip only when dangerously close to the portal plane, where projection can
         // straddle the near plane and become numerically unstable.
-        if(portalToCamera.magnitude() > 1.5) {
+        if(distanceSqr > 2.25D) {
             float[] rect = getPortalNdcRectCached(portal, camera, projectionMatrix);
             if(rect != null && !rectsIntersect(rect, currentParentNdcRect)) {
                 portalsCulledByNdcRect++;
