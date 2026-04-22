@@ -833,15 +833,7 @@ public class PortalRenderer {
     }
 
     private boolean shouldUseShaderTransparency(Minecraft mc) {
-        if(!Minecraft.useShaderTransparency())
-            return false;
-
-        int w = mc.getWindow().getWidth();
-        int h = mc.getWindow().getHeight();
-        if(tempFBO.width != w || tempFBO.height != h)
-            tempFBO.resize(w, h, Minecraft.ON_OSX);
-
-        return ensureTempFramebufferStencil();
+        return false;
     }
 
     public boolean prepareMainFramebufferForPortalRendering(@Nullable ClientWorld level) {
@@ -931,7 +923,6 @@ public class PortalRenderer {
         if(fabulousGraphics) {
             PROFILE.push("fabulousBlit@r" + recursion);
             blitFBOtoFBO(mainFBO, tempFBO);
-            tempFBO.copyDepthFrom(mainFBO);
             mainFBO.bindWrite(true);
             PROFILE.pop();
         }
@@ -1631,7 +1622,6 @@ public class PortalRenderer {
                     RenderSystem.stencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
                     PROFILE.push("fabulousBlit(nested)");
                     blitFBOtoFBO(tempFBO, mainFBO);
-                    mainFBO.copyDepthFrom(tempFBO);
                     mainFBO.bindWrite(true);
                     PROFILE.pop();
                 }
