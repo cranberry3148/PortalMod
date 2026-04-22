@@ -12,6 +12,7 @@ import net.minecraft.client.renderer.tileentity.TileEntityRendererDispatcher;
 import net.minecraft.client.renderer.vertex.DefaultVertexFormats;
 import net.minecraft.client.renderer.vertex.VertexBuffer;
 import net.minecraft.client.shader.Framebuffer;
+import net.minecraft.client.settings.GraphicsFanciness;
 import net.minecraft.client.world.ClientWorld;
 import net.minecraft.entity.Entity;
 import net.minecraft.particles.RedstoneParticleData;
@@ -149,6 +150,7 @@ public class PortalRenderer {
     private float lastOuterCameraXRot;
     private float lastOuterCameraYRot;
     private float fastCameraMotionFactor;
+    private boolean performanceOptimizationsEnabled = true;
     private boolean mainFramebufferStencilFailed;
     private boolean tempFramebufferStencilFailed;
 
@@ -344,6 +346,10 @@ public class PortalRenderer {
         return framePortalEntities;
     }
 
+    private boolean shouldUsePortalPerformanceOptimizations() {
+        return performanceOptimizationsEnabled;
+    }
+
     @Nullable
     public NestedRenderSettings getCurrentNestedRenderSettings() {
         return nestedRenderSettingsStack.peekLast();
@@ -429,6 +435,9 @@ public class PortalRenderer {
     }
 
     private boolean passesCheapPortalViewTests(PortalEntity portal, Vec3 cameraPos, ClippingHelper clippingHelper) {
+        if(!shouldUsePortalPerformanceOptimizations())
+            return true;
+
         double distanceSqr = distanceToCameraSqr(portal, cameraPos);
         if(isPortalFacingAwayFromCamera(portal, cameraPos))
             return false;
@@ -468,7 +477,8 @@ public class PortalRenderer {
                     entry.importance -= Math.min(temporal.culledStreak, 3) * TEMPORAL_CULLED_IMPORTANCE_PENALTY;
             }
             entry.importance = MathHelper.clamp(entry.importance, 0.0F, 1.5F);
-            entry.topLevelCandidate = passesCheapTests && isTopLevelPortalCandidate(portal, cameraPos, clippingHelper, rect);
+            entry.topLevelCandidate = !shouldUsePortalPerformanceOptimizations()
+                    || (passesCheapTests && isTopLevelPortalCandidate(portal, cameraPos, clippingHelper, rect));
             portalFramePlan.put(portal.getUUID(), entry);
         }
 
@@ -489,6 +499,9 @@ public class PortalRenderer {
     }
 
     private boolean isTopLevelPortalCandidate(PortalEntity portal, Vec3 cameraPos, ClippingHelper clippingHelper, @Nullable float[] rect) {
+        if(!shouldUsePortalPerformanceOptimizations())
+            return true;
+
         double distanceSqr = distanceToCameraSqr(portal, cameraPos);
 
         if(distanceSqr > 1.0D && !clippingHelper.isVisible(portal.getBoundingBox()))
@@ -561,6 +574,9 @@ public class PortalRenderer {
     }
 
     private NestedRenderSettings buildNestedRenderSettings(PortalEntity portal, float portalCoverage) {
+        if(!shouldUsePortalPerformanceOptimizations())
+            return NestedRenderSettings.full().mergeWithParent(getCurrentNestedRenderSettings());
+
         PortalFramePlanEntry plan = portalFramePlan.get(portal.getUUID());
         int rank = plan == null ? Integer.MAX_VALUE : plan.rank;
         float coverage = plan == null ? portalCoverage : plan.coverage;
@@ -846,6 +862,7 @@ public class PortalRenderer {
     public void renderPortals(ClientWorld level, ActiveRenderInfo camera, ClippingHelper clippingHelper, Matrix4f projectionMatrix, float partialTicks) {
         Minecraft mc = Minecraft.getInstance();
         Framebuffer mainFBO = mc.getMainRenderTarget();
+        performanceOptimizationsEnabled = mc.options.graphicsMode != GraphicsFanciness.FABULOUS;
 
         boolean isOuter = recursion == 0;
         if(isOuter) {
@@ -874,7 +891,9 @@ public class PortalRenderer {
 
         mc.levelRenderer.renderBuffers.bufferSource().endBatch();
 
-        List<PortalEntity> portalsToRender = recursion == 0 ? topLevelPortalCandidates : getFramePortalEntities(level);
+        List<PortalEntity> portalsToRender = recursion == 0 && shouldUsePortalPerformanceOptimizations()
+                ? topLevelPortalCandidates
+                : getFramePortalEntities(level);
         if(recursion == 0 && portalsToRender.isEmpty()) {
             PROFILE.pop();
             if(isOuter) {
@@ -1276,6 +1295,9 @@ public class PortalRenderer {
     }
 
     private float getOcclusionCacheRelaxation(float portalCoverage, boolean fullyOccluded) {
+        if(!shouldUsePortalPerformanceOptimizations())
+            return 0.0F;
+
         if(!fullyOccluded)
             return 0.0F;
 
@@ -1551,25 +1573,28 @@ public class PortalRenderer {
                 // the shrinking silhouette, so we shrink the chunk-walk seed grid
                 // geometrically. At r=1: /2, r=2: /4, r=3: /8, ... — mirrors
                 // Source engine's portal-aware PVS pruning without needing a PVS.
-                int shift = Math.min(recursion, 5);
-                // Clamp nested chunk visibility by projected portal coverage more aggressively
-                // than sqrt(area), but never to zero. This preserves a live portal opening while
-                // cutting far-away detail that cannot materially contribute through a tiny stencil.
-                float coverageScale = Math.max((float)Math.pow(Math.max(portalCoverage, NESTED_PORTAL_MIN_COVERAGE), 0.65F), 0.12F);
-                if(recursion >= 2)
-                    coverageScale = Math.max(0.1F, coverageScale * 0.85F);
-                if(fastCameraMotionFactor > 0.0F) {
-                    float motionScale = MathHelper.lerp(fastCameraMotionFactor, 1.0F, recursion >= 2 ? 0.25F : 0.4F);
-                    coverageScale = Math.max(0.06F, coverageScale * motionScale);
+                int clampedDistance = origLastViewDistance;
+                if(shouldUsePortalPerformanceOptimizations()) {
+                    int shift = Math.min(recursion, 5);
+                    // Clamp nested chunk visibility by projected portal coverage more aggressively
+                    // than sqrt(area), but never to zero. This preserves a live portal opening while
+                    // cutting far-away detail that cannot materially contribute through a tiny stencil.
+                    float coverageScale = Math.max((float)Math.pow(Math.max(portalCoverage, NESTED_PORTAL_MIN_COVERAGE), 0.65F), 0.12F);
+                    if(recursion >= 2)
+                        coverageScale = Math.max(0.1F, coverageScale * 0.85F);
+                    if(fastCameraMotionFactor > 0.0F) {
+                        float motionScale = MathHelper.lerp(fastCameraMotionFactor, 1.0F, recursion >= 2 ? 0.25F : 0.4F);
+                        coverageScale = Math.max(0.06F, coverageScale * motionScale);
+                    }
+                    int recursionDistance = Math.max(2, origLastViewDistance >> shift);
+                    int coverageDistance = Math.max(2, Math.round(origLastViewDistance * coverageScale));
+                    if(fastCameraMotionFactor >= FAST_CAMERA_HARD_CLAMP_START) {
+                        float t = (fastCameraMotionFactor - FAST_CAMERA_HARD_CLAMP_START) / (1.0F - FAST_CAMERA_HARD_CLAMP_START);
+                        int hardClampDistance = Math.max(2, Math.round(MathHelper.lerp(t, 6.0F, recursion >= 2 ? 2.0F : 4.0F)));
+                        coverageDistance = Math.min(coverageDistance, hardClampDistance);
+                    }
+                    clampedDistance = Math.max(2, Math.min(recursionDistance, coverageDistance));
                 }
-                int recursionDistance = Math.max(2, origLastViewDistance >> shift);
-                int coverageDistance = Math.max(2, Math.round(origLastViewDistance * coverageScale));
-                if(fastCameraMotionFactor >= FAST_CAMERA_HARD_CLAMP_START) {
-                    float t = (fastCameraMotionFactor - FAST_CAMERA_HARD_CLAMP_START) / (1.0F - FAST_CAMERA_HARD_CLAMP_START);
-                    int hardClampDistance = Math.max(2, Math.round(MathHelper.lerp(t, 6.0F, recursion >= 2 ? 2.0F : 4.0F)));
-                    coverageDistance = Math.min(coverageDistance, hardClampDistance);
-                }
-                int clampedDistance = Math.max(2, Math.min(recursionDistance, coverageDistance));
                 boolean distanceClamped = clampedDistance < origLastViewDistance;
                 int previousOverride = nestedBfsDistanceOverride;
                 if(distanceClamped) {
