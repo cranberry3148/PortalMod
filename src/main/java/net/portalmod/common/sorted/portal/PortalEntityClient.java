@@ -203,7 +203,7 @@ public class PortalEntityClient {
 
             if(((ITeleportLerpable)Minecraft.getInstance().player).hasUsedPortal()) {
                 Minecraft.getInstance().getProfiler().push("pm_translucent_sort");
-                PortalTransparencyHandler.resortMainTransparency(new Vec3(newCamera.getPosition()));
+                PortalTransparencyHandler.resortMainTransparency(newCamera);
                 Minecraft.getInstance().getProfiler().pop();
             }
         }
