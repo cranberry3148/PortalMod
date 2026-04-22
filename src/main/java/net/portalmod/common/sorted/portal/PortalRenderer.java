@@ -450,12 +450,7 @@ public class PortalRenderer {
                     entry.importance -= Math.min(temporal.culledStreak, 3) * TEMPORAL_CULLED_IMPORTANCE_PENALTY;
             }
             entry.importance = MathHelper.clamp(entry.importance, 0.0F, 1.5F);
-            boolean cachedOccluded = passesCheapTests && isPortalOccludedByValidCache(portal, camera, coverage);
-            boolean plannerVisible = passesCheapTests
-                    && !cachedOccluded
-                    && isTopLevelPortalCandidate(portal, cameraPos, clippingHelper, rect)
-                    && !discardPortal(portal, camera, clippingHelper, projectionMatrix);
-            entry.topLevelCandidate = plannerVisible;
+            entry.topLevelCandidate = passesCheapTests && isTopLevelPortalCandidate(portal, cameraPos, clippingHelper, rect);
             portalFramePlan.put(portal.getUUID(), entry);
         }
 
@@ -1223,20 +1218,6 @@ public class PortalRenderer {
     private long getOcclusionCacheTicks(PortalOcclusionCacheEntry entry, float portalCoverage) {
         float relaxation = getOcclusionCacheRelaxation(portalCoverage, entry.fullyOccluded);
         return Math.round(MathHelper.lerp(relaxation, (float)OCCLUSION_CACHE_TICKS, (float)OCCLUSION_CACHE_MAX_TICKS));
-    }
-
-    private boolean isPortalOccludedByValidCache(PortalEntity portal, ActiveRenderInfo camera, float portalCoverage) {
-        ClientWorld world = Minecraft.getInstance().level;
-        if(world == null)
-            return false;
-
-        PortalOcclusionCacheEntry cached = portalOcclusionCache.get(portal.getUUID());
-        if(cached == null || !cached.fullyOccluded)
-            return false;
-
-        long gameTime = world.getGameTime();
-        return gameTime - cached.gameTime <= getOcclusionCacheTicks(cached, portalCoverage)
-                && !cameraChangedTooMuchForOcclusionCache(cached, camera, portalCoverage);
     }
 
     private boolean portalOpeningFullyOccludedCached(PortalEntity portal, ActiveRenderInfo camera, float portalCoverage) {
