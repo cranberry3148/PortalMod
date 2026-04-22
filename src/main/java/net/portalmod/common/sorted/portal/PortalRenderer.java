@@ -961,9 +961,21 @@ public class PortalRenderer {
 
         GL11.glEnable(GL_ALPHA_TEST);
         if(recursion == 0) {
+            mainFBO.bindWrite(true);
+            glDisable(GL_CLIP_PLANE0);
             GL11.glDisable(GL_STENCIL_TEST);
             RenderSystem.stencilMask(~0);
+            RenderSystem.stencilFunc(GL_ALWAYS, 0, 0xFF);
             RenderSystem.stencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+            RenderSystem.colorMask(true, true, true, true);
+            RenderSystem.enableDepthTest();
+            RenderSystem.depthFunc(GL_LESS);
+            RenderSystem.depthMask(true);
+            RenderSystem.disableBlend();
+            RenderSystem.defaultBlendFunc();
+            RenderSystem.enableCull();
+            RenderSystem.activeTexture(GL_TEXTURE0);
+            RenderSystem.bindTexture(0);
         }
 
         PROFILE.pop();
@@ -1614,6 +1626,7 @@ public class PortalRenderer {
                     }
                     PROFILE.pop();
                 }
+                mainFBO.bindWrite(true);
 
                 PROFILE.push("restoreRenderChunks");
                 try {
