@@ -5,12 +5,15 @@ import com.mojang.blaze3d.systems.RenderSystem;
 import net.minecraft.block.BlockState;
 import net.minecraft.client.GameSettings;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.particle.ParticleManager;
 import net.minecraft.client.renderer.*;
 import net.minecraft.client.renderer.chunk.ChunkRenderDispatcher;
 import net.minecraft.client.renderer.culling.ClippingHelper;
 import net.minecraft.client.renderer.entity.EntityRendererManager;
+import net.minecraft.client.renderer.tileentity.TileEntityRendererDispatcher;
 import net.minecraft.client.world.ClientWorld;
 import net.minecraft.entity.Entity;
+import net.minecraft.tileentity.TileEntity;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.vector.Matrix4f;
 import net.minecraft.util.math.vector.Vector3d;
@@ -27,6 +30,11 @@ import org.spongepowered.asm.mixin.injection.invoke.arg.Args;
 
 @Mixin(WorldRenderer.class)
 public class LevelRendererMixin {
+    private static boolean pmShouldUseNestedRenderPolicy() {
+        return PortalRenderer.getInstance().currentlyRenderingPortals
+                && PortalRenderer.getInstance().recursion > 0
+                && PortalRenderer.getInstance().getCurrentNestedRenderSettings() != null;
+    }
 
     @Redirect(method = "levelEvent", at = @At(value = "INVOKE", target = "Lnet/minecraft/block/BlockState;isAir(Lnet/minecraft/world/IBlockReader;Lnet/minecraft/util/math/BlockPos;)Z"))
     public boolean fizzlerIsAirToo(BlockState instance, IBlockReader blockReader, BlockPos pos) {
@@ -108,6 +116,19 @@ public class LevelRendererMixin {
         PortalRenderer.getInstance().renderPortals(level, camera, clippinghelper, matrix, partialTicks);
     }
 
+    @Redirect(
+            method = "renderLevel",
+            at = @At(
+                    value = "INVOKE",
+                    target = "Lnet/minecraft/client/renderer/WorldRenderer;renderSky(Lcom/mojang/blaze3d/matrix/MatrixStack;F)V"
+            )
+    )
+    private void pmGateNestedSky(WorldRenderer instance, MatrixStack matrixStack, float partialTicks) {
+        if(pmShouldUseNestedRenderPolicy() && !PortalRenderer.getInstance().shouldRenderNestedClouds())
+            return;
+        instance.renderSky(matrixStack, partialTicks);
+    }
+
     // BEWARE: PORTAL RENDERING
     @ModifyArgs(
                         method = "renderLevel",
@@ -166,6 +187,15 @@ public class LevelRendererMixin {
         }
     }
 
+    @Inject(method = "renderChunkLayer", at = @At("HEAD"), cancellable = true)
+    private void pmSkipSecondaryNestedTranslucent(RenderType renderType, MatrixStack matrixStack, double x, double y, double z, CallbackInfo ci) {
+        if(pmShouldUseNestedRenderPolicy()
+                && (renderType == RenderType.translucent() || renderType == RenderType.tripwire() || renderType == PortalTransparencyHandler.PORTAL_TRANSLUCENT)
+                && !PortalRenderer.getInstance().shouldRenderNestedTranslucent()) {
+            ci.cancel();
+        }
+    }
+
     // BEWARE: PORTAL RENDERING
     @Redirect(
                         method = "setupRender",
@@ -198,6 +228,19 @@ public class LevelRendererMixin {
     private int pmMaskRenderDistanceForAllChangedGuard(GameSettings instance) {
         int override = PortalRenderer.getInstance().nestedBfsDistanceOverride;
         return override > 0 ? override : instance.renderDistance;
+    }
+
+    @Redirect(
+            method = "renderLevel",
+            at = @At(
+                    value = "INVOKE",
+                    target = "Lnet/minecraft/client/renderer/WorldRenderer;compileChunksUntil(J)V"
+            )
+    )
+    private void pmSkipNestedChunkCompilation(WorldRenderer instance, long deadlineNs) {
+        if(pmShouldUseNestedRenderPolicy() && !PortalRenderer.getInstance().shouldCompileNestedChunks())
+            return;
+        instance.compileChunksUntil(deadlineNs);
     }
 
     // BEWARE: PORTAL RENDERING
@@ -240,6 +283,84 @@ public class LevelRendererMixin {
         if(!PortalModConfigManager.RENDER_SELF.get() || entity != Minecraft.getInstance().cameraEntity)
             return erm.shouldRender(entity, clippingHelper, camX, camY, camZ);
         return DuplicateEntityRenderer.shouldRenderSelf(entity, clippingHelper);
+    }
+
+    @Redirect(
+            method = "renderLevel",
+            at = @At(
+                    value = "INVOKE",
+                    target = "Lnet/minecraft/client/renderer/WorldRenderer;renderEntity(Lnet/minecraft/entity/Entity;DDDFLcom/mojang/blaze3d/matrix/MatrixStack;Lnet/minecraft/client/renderer/IRenderTypeBuffer;)V"
+            )
+    )
+    private void pmGateNestedEntities(WorldRenderer instance, Entity entity, double camX, double camY, double camZ, float partialTicks, MatrixStack matrixStack, IRenderTypeBuffer buffer) {
+        if(pmShouldUseNestedRenderPolicy() && !PortalRenderer.getInstance().shouldRenderNestedEntities())
+            return;
+        instance.renderEntity(entity, camX, camY, camZ, partialTicks, matrixStack, buffer);
+    }
+
+    @Redirect(
+            method = "renderLevel",
+            at = @At(
+                    value = "INVOKE",
+                    target = "Lnet/minecraft/client/renderer/tileentity/TileEntityRendererDispatcher;render(Lnet/minecraft/tileentity/TileEntity;FLcom/mojang/blaze3d/matrix/MatrixStack;Lnet/minecraft/client/renderer/IRenderTypeBuffer;)V"
+            )
+    )
+    private void pmGateNestedBlockEntities(TileEntityRendererDispatcher instance, TileEntity tileEntity, float partialTicks, MatrixStack matrixStack, IRenderTypeBuffer buffer) {
+        if(pmShouldUseNestedRenderPolicy() && !PortalRenderer.getInstance().shouldRenderNestedBlockEntities())
+            return;
+        instance.render(tileEntity, partialTicks, matrixStack, buffer);
+    }
+
+    @Redirect(
+            method = "renderLevel",
+            at = @At(
+                    value = "INVOKE",
+                    target = "Lnet/minecraft/client/particle/ParticleManager;renderParticles(Lcom/mojang/blaze3d/matrix/MatrixStack;Lnet/minecraft/client/renderer/IRenderTypeBuffer$Impl;Lnet/minecraft/client/renderer/LightTexture;Lnet/minecraft/client/renderer/ActiveRenderInfo;FLnet/minecraft/client/renderer/culling/ClippingHelper;)V"
+            )
+    )
+    private void pmGateNestedParticles(ParticleManager instance, MatrixStack matrixStack, IRenderTypeBuffer.Impl buffer, LightTexture lightTexture, ActiveRenderInfo camera, float partialTicks, ClippingHelper clippingHelper) {
+        if(pmShouldUseNestedRenderPolicy() && !PortalRenderer.getInstance().shouldRenderNestedParticles())
+            return;
+        instance.renderParticles(matrixStack, buffer, lightTexture, camera, partialTicks, clippingHelper);
+    }
+
+    @Redirect(
+            method = "renderLevel",
+            at = @At(
+                    value = "INVOKE",
+                    target = "Lnet/minecraft/client/renderer/WorldRenderer;renderClouds(Lcom/mojang/blaze3d/matrix/MatrixStack;FDDD)V"
+            )
+    )
+    private void pmGateNestedClouds(WorldRenderer instance, MatrixStack matrixStack, float partialTicks, double x, double y, double z) {
+        if(pmShouldUseNestedRenderPolicy() && !PortalRenderer.getInstance().shouldRenderNestedClouds())
+            return;
+        instance.renderClouds(matrixStack, partialTicks, x, y, z);
+    }
+
+    @Redirect(
+            method = "renderLevel",
+            at = @At(
+                    value = "INVOKE",
+                    target = "Lnet/minecraft/client/renderer/WorldRenderer;renderSnowAndRain(Lnet/minecraft/client/renderer/LightTexture;FDDD)V"
+            )
+    )
+    private void pmGateNestedWeather(WorldRenderer instance, LightTexture lightTexture, float partialTicks, double x, double y, double z) {
+        if(pmShouldUseNestedRenderPolicy() && !PortalRenderer.getInstance().shouldRenderNestedWeather())
+            return;
+        instance.renderSnowAndRain(lightTexture, partialTicks, x, y, z);
+    }
+
+    @Redirect(
+            method = "renderLevel",
+            at = @At(
+                    value = "INVOKE",
+                    target = "Lnet/minecraft/client/renderer/WorldRenderer;renderWorldBounds(Lnet/minecraft/client/renderer/ActiveRenderInfo;)V"
+            )
+    )
+    private void pmGateNestedWorldBounds(WorldRenderer instance, ActiveRenderInfo camera) {
+        if(pmShouldUseNestedRenderPolicy() && !PortalRenderer.getInstance().shouldRenderNestedWeather())
+            return;
+        instance.renderWorldBounds(camera);
     }
 
     // BEWARE: PORTAL RENDERING
