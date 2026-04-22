@@ -840,7 +840,6 @@ public class PortalRenderer {
             return true;
         return ensureMainFramebufferStencil(Minecraft.getInstance().getMainRenderTarget());
     }
-
     public void renderPortals(ClientWorld level, ActiveRenderInfo camera, ClippingHelper clippingHelper, Matrix4f projectionMatrix, float partialTicks) {
         Minecraft mc = Minecraft.getInstance();
         Framebuffer mainFBO = mc.getMainRenderTarget();
