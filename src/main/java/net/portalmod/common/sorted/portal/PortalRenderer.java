@@ -944,13 +944,18 @@ public class PortalRenderer {
         }
 
         if(recursion == 0 && !fabulousGraphics) {
-            mainFBO.bindWrite(false);
+            mainFBO.bindWrite(true);
             GL11.glEnable(GL_STENCIL_TEST);
             RenderSystem.stencilMask(0xFF);
             RenderSystem.clear(GL_STENCIL_BUFFER_BIT, false);
         }
 
         GL11.glEnable(GL_ALPHA_TEST);
+        if(recursion == 0) {
+            GL11.glDisable(GL_STENCIL_TEST);
+            RenderSystem.stencilMask(~0);
+            RenderSystem.stencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+        }
 
         PROFILE.pop();
         if(isOuter) {
