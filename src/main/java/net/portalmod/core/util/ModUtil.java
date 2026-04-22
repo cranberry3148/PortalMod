@@ -27,6 +27,7 @@ import net.portalmod.core.math.Mat4;
 import net.portalmod.core.math.Vec3;
 
 import java.util.*;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
@@ -255,7 +256,7 @@ public class ModUtil {
     }
 
     public static float symmetricRandom(float width) {
-        return new Random().nextFloat() * width * 2 - width;
+        return ThreadLocalRandom.current().nextFloat() * width * 2 - width;
     }
 
     public static float symmetricRandom() {
