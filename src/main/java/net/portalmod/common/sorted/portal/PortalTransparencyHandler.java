@@ -33,12 +33,12 @@ public class PortalTransparencyHandler {
             }))
             .setOutputState(new RenderState.TargetState("translucent_target", () -> {
                 if (Minecraft.useShaderTransparency()) {
-                    Minecraft.getInstance().levelRenderer.getTranslucentTarget().bindWrite(false);
+                    Minecraft.getInstance().levelRenderer.getTranslucentTarget().bindWrite(true);
                 }
 
             }, () -> {
                 if (Minecraft.useShaderTransparency()) {
-                    Minecraft.getInstance().getMainRenderTarget().bindWrite(false);
+                    Minecraft.getInstance().getMainRenderTarget().bindWrite(true);
                 }
 
             }))

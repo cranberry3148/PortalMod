@@ -904,7 +904,7 @@ public class PortalRenderer {
             PROFILE.push("fabulousBlit@r" + recursion);
             blitFBOtoFBO(mainFBO, tempFBO);
             tempFBO.copyDepthFrom(mainFBO);
-            mainFBO.bindWrite(false);
+            mainFBO.bindWrite(true);
             PROFILE.pop();
         }
 
@@ -1373,7 +1373,7 @@ public class PortalRenderer {
 
         RenderSystem.activeTexture(GL_TEXTURE0);
         src.bindRead();
-        dest.bindWrite(false);
+        dest.bindWrite(true);
         blitQuad.render();
 
         RenderSystem.enableDepthTest();
@@ -1599,7 +1599,7 @@ public class PortalRenderer {
                     PROFILE.push("fabulousBlit(nested)");
                     blitFBOtoFBO(tempFBO, mainFBO);
                     mainFBO.copyDepthFrom(tempFBO);
-                    mainFBO.bindWrite(false);
+                    mainFBO.bindWrite(true);
                     PROFILE.pop();
                 }
             }

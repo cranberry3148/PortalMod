@@ -63,7 +63,6 @@
         "renderer.ChunkRenderMixin",
         "renderer.EntityRendererManagerMixin",
         "renderer.EntityRendererMixin",
-        "renderer.FramebufferMixin",
         "renderer.GameRendererMixin",
         "renderer.ItemRendererMixin",
         "renderer.LevelRendererMixin",
