@@ -11,7 +11,6 @@ import net.minecraft.client.renderer.culling.ClippingHelper;
 import net.minecraft.client.renderer.tileentity.TileEntityRendererDispatcher;
 import net.minecraft.client.renderer.vertex.DefaultVertexFormats;
 import net.minecraft.client.renderer.vertex.VertexBuffer;
-import net.minecraft.client.settings.GraphicsFanciness;
 import net.minecraft.client.shader.Framebuffer;
 import net.minecraft.client.world.ClientWorld;
 import net.minecraft.entity.Entity;
@@ -833,6 +832,18 @@ public class PortalRenderer {
         }
     }
 
+    private boolean shouldUseShaderTransparency(Minecraft mc) {
+        if(!Minecraft.useShaderTransparency())
+            return false;
+
+        int w = mc.getWindow().getWidth();
+        int h = mc.getWindow().getHeight();
+        if(tempFBO.width != w || tempFBO.height != h)
+            tempFBO.resize(w, h, Minecraft.ON_OSX);
+
+        return ensureTempFramebufferStencil();
+    }
+
     public boolean prepareMainFramebufferForPortalRendering(@Nullable ClientWorld level) {
         if(level == null || mainFramebufferStencilFailed)
             return !mainFramebufferStencilFailed;
@@ -892,18 +903,7 @@ public class PortalRenderer {
             }
 
             currentlyRenderingPortals = true;
-            fabulousGraphics = mc.options.graphicsMode == GraphicsFanciness.FABULOUS;
-
-            if(fabulousGraphics) {
-                int w = mc.getWindow().getWidth();
-                int h = mc.getWindow().getHeight();
-
-                if(tempFBO.width != w || tempFBO.height != h)
-                    tempFBO.resize(w, h, Minecraft.ON_OSX);
-
-                if(!ensureTempFramebufferStencil())
-                    fabulousGraphics = false;
-            }
+            fabulousGraphics = shouldUseShaderTransparency(mc);
 
             if(fabulousGraphics) {
                 tempFBO.bindWrite(true);
