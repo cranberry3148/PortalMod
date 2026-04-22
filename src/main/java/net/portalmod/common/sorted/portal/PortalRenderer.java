@@ -873,7 +873,7 @@ public class PortalRenderer {
             PROFILE.pop();
         }
 
-        if(PortalModConfigManager.HIGHLIGHTS.get()) {
+        if(recursion == 0 && PortalModConfigManager.HIGHLIGHTS.get()) {
             PROFILE.push("highlights");
             renderHighlights(camera, projectionMatrix);
             PROFILE.pop();
