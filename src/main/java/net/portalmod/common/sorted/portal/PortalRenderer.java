@@ -289,25 +289,30 @@ public class PortalRenderer {
         final boolean renderBlockEntities;
         final boolean renderTranslucent;
         final boolean renderParticles;
+        final boolean renderSky;
         final boolean renderClouds;
         final boolean renderWeather;
+        final boolean renderWorldBounds;
         final boolean compileChunks;
 
         private NestedRenderSettings(boolean renderEntities, boolean renderBlockEntities,
                                      boolean renderTranslucent, boolean renderParticles,
-                                     boolean renderClouds, boolean renderWeather,
+                                     boolean renderSky, boolean renderClouds, boolean renderWeather,
+                                     boolean renderWorldBounds,
                                      boolean compileChunks) {
             this.renderEntities = renderEntities;
             this.renderBlockEntities = renderBlockEntities;
             this.renderTranslucent = renderTranslucent;
             this.renderParticles = renderParticles;
+            this.renderSky = renderSky;
             this.renderClouds = renderClouds;
             this.renderWeather = renderWeather;
+            this.renderWorldBounds = renderWorldBounds;
             this.compileChunks = compileChunks;
         }
 
         private static NestedRenderSettings full() {
-            return new NestedRenderSettings(true, true, true, true, true, true, true);
+            return new NestedRenderSettings(true, true, true, true, true, true, true, true, true);
         }
 
         private NestedRenderSettings mergeWithParent(@Nullable NestedRenderSettings parent) {
@@ -318,8 +323,10 @@ public class PortalRenderer {
                     parent.renderBlockEntities && this.renderBlockEntities,
                     parent.renderTranslucent && this.renderTranslucent,
                     parent.renderParticles && this.renderParticles,
+                    parent.renderSky && this.renderSky,
                     parent.renderClouds && this.renderClouds,
                     parent.renderWeather && this.renderWeather,
+                    parent.renderWorldBounds && this.renderWorldBounds,
                     parent.compileChunks && this.compileChunks
             );
         }
@@ -361,6 +368,11 @@ public class PortalRenderer {
         return settings == null || settings.renderParticles;
     }
 
+    public boolean shouldRenderNestedSky() {
+        NestedRenderSettings settings = getCurrentNestedRenderSettings();
+        return settings == null || settings.renderSky;
+    }
+
     public boolean shouldRenderNestedClouds() {
         NestedRenderSettings settings = getCurrentNestedRenderSettings();
         return settings == null || settings.renderClouds;
@@ -369,6 +381,11 @@ public class PortalRenderer {
     public boolean shouldRenderNestedWeather() {
         NestedRenderSettings settings = getCurrentNestedRenderSettings();
         return settings == null || settings.renderWeather;
+    }
+
+    public boolean shouldRenderNestedWorldBounds() {
+        NestedRenderSettings settings = getCurrentNestedRenderSettings();
+        return settings == null || settings.renderWorldBounds;
     }
 
     public boolean shouldCompileNestedChunks() {
